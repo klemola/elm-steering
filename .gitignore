@@ -1,0 +1,19 @@
+# elm-package generated files
+elm-stuff/
+# elm-repl generated files
+repl-temp-*
+
+elm.js
+*-debug.js
+index.html
+next.html
+Scratchpad.elm
+notes.md
+debug.md
+
+build/
+
+.DS_Store
+
+*.code-workspace
+.vscode
