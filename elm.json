@@ -1,30 +1,20 @@
 {
     "type": "package",
+    "name": "klemola/elm-steering",
+    "summary": "Classic steering behaviors for games and simulations",
+    "license": "BSD-3-Clause",
     "version": "0.0.1",
-    "exposed-modules": ["Steering2d"],
-    "source-directories": ["src"],
-    "elm-version": "0.19.1",
+    "exposed-modules": [
+        "Steering2d"
+    ],
+    "source-directories": [
+        "src"
+    ],
+    "elm-version": "0.19.1 <= v < 0.20.0",
     "dependencies": {
-        "direct": {
-            "elm/core": "1.0.5",
-            "ianmackenzie/elm-geometry": "4.0.0",
-            "ianmackenzie/elm-units": "2.10.0"
-        },
-        "indirect": {
-            "elm/json": "1.1.3",
-            "elm/random": "1.0.0",
-            "elm/time": "1.0.0",
-            "elm/url": "1.0.0",
-            "elm/virtual-dom": "1.0.3",
-            "ianmackenzie/elm-1d-parameter": "1.0.1",
-            "ianmackenzie/elm-float-extra": "1.1.0",
-            "ianmackenzie/elm-interval": "3.1.0",
-            "ianmackenzie/elm-triangular-mesh": "1.1.0",
-            "ianmackenzie/elm-units-interval": "3.2.0"
-        }
+        "elm/core": "1.0.5 <= v < 2.0.0",
+        "ianmackenzie/elm-geometry": "4.0.0 <= v < 5.0.0",
+        "ianmackenzie/elm-units": "2.10.0 <= v < 3.0.0"
     },
-    "test-dependencies": {
-        "direct": {},
-        "indirect": {}
-    }
+    "test-dependencies": {}
 }
