@@ -92,14 +92,14 @@ stopAtDistance config distanceFromTarget threshold currentVelocity =
 rotate : SteeringConfig2d -> Steering2d
 rotate { maxAngularAcceleration } =
     { linear = Nothing
-    , angular = Just maxAngularAcceleration
+    , angular = Just (Quantity.negate maxAngularAcceleration)
     }
 
 
 rotateCounterclockwise : SteeringConfig2d -> Steering2d
 rotateCounterclockwise { maxAngularAcceleration } =
     { linear = Nothing
-    , angular = Just (Quantity.negate maxAngularAcceleration)
+    , angular = Just maxAngularAcceleration
     }
 
 
@@ -148,7 +148,7 @@ reachTargetVelocity { maxAcceleration } currentVelocity targetVelocity =
             if Quantity.difference currentVelocity targetVelocity |> isCloseToZeroVelocity then
                 -- With floating point precision the velocity is rarely exactly zero.
                 -- With absolute comparison to target speed and a very low acceleration the
-                -- car will hover just above and below zero, appearing to be still
+                -- steerable will hover just above and below zero, appearing to be still
                 Acceleration.metersPerSecondSquared 0.1
 
             else
@@ -277,16 +277,26 @@ arriveAcceleration config source distance =
             Duration.seconds 0.1
 
         slowingRadius =
-            Length.meters 5.0
+            Length.meters 8.0
+
+        distanceStep =
+            source.velocity |> Quantity.for timeToTarget
+
+        predictedDistance =
+            distance |> Quantity.minus distanceStep
+
+        effectiveDistance =
+            Quantity.max predictedDistance (Length.meters 0.1)
 
         targetSpeed =
-            if distance |> Quantity.greaterThan slowingRadius then
+            if effectiveDistance |> Quantity.greaterThan slowingRadius then
                 config.maxVelocity
 
             else
-                config.maxVelocity |> Quantity.multiplyBy (Quantity.ratio distance slowingRadius)
+                let
+                    ratio =
+                        Quantity.ratio effectiveDistance slowingRadius
+                in
+                config.maxVelocity |> Quantity.multiplyBy ratio
     in
-    targetSpeed
-        |> Quantity.minus source.velocity
-        |> Quantity.per timeToTarget
-        |> Quantity.clamp (Quantity.negate config.maxAcceleration) config.maxAcceleration
+    reachTargetVelocity config source.velocity targetSpeed
