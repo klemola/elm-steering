@@ -11,12 +11,15 @@ import Fuzz exposing (Fuzzer)
 import Length
 import Point2d exposing (Point2d)
 import Quantity exposing (Quantity)
+import Random
+import Set
 import Speed exposing (Speed)
 import Steering2d
     exposing
         ( Steering2d
         , SteeringConfig2d
         , Transform2d
+        , WanderConfig2d
         , accelerate
         , arrive
         , decelerate
@@ -26,6 +29,7 @@ import Steering2d
         , rotateCounterclockwise
         , seek
         , stopRotating
+        , wander
         )
 import Test
     exposing
@@ -33,6 +37,7 @@ import Test
         , describe
         , fuzz
         , fuzz2
+        , fuzz3
         , test
         )
 import Vector2d
@@ -47,6 +52,19 @@ defaultConfig =
     , maxAngularAcceleration = AngularAcceleration.radiansPerSecondSquared 22.3
     , maxRotation = AngularSpeed.radiansPerSecond 2.5
     }
+
+
+defaultWanderConfig : WanderConfig2d
+defaultWanderConfig =
+    { distance = Length.meters 3
+    , radius = Length.meters 0.5
+    , rate = 0.1
+    }
+
+
+defaultSeed : Random.Seed
+defaultSeed =
+    Random.initialSeed 42
 
 
 type TestCoordinates
@@ -99,6 +117,16 @@ transformFuzzer =
         (Fuzz.map AngularSpeed.radiansPerSecond (Fuzz.floatRange -5 5))
 
 
+angleFuzzer : Fuzzer Angle
+angleFuzzer =
+    Fuzz.map Angle.radians (Fuzz.floatRange -6.28 6.28)
+
+
+seedFuzzer : Fuzzer Random.Seed
+seedFuzzer =
+    Fuzz.map Random.initialSeed (Fuzz.intRange 0 1000000)
+
+
 suite : Test
 suite =
     describe "Steering2d behaviors"
@@ -112,6 +140,9 @@ suite =
         , arriveTests
         , arriveFuzzTests
         , arriveIntegrationTests
+        , wanderTests
+        , wanderFuzzTests
+        , wanderIntegrationTests
         ]
 
 
@@ -1002,6 +1033,275 @@ arriveIntegrationTests =
         ]
 
 
+wanderTests : Test
+wanderTests =
+    describe "wander behavior - unit tests"
+        [ test "produces linear acceleration" <|
+            \_ ->
+                let
+                    config =
+                        defaultConfig
+
+                    wanderConfig =
+                        defaultWanderConfig
+
+                    wanderAngle =
+                        Angle.radians 0
+
+                    source =
+                        atOrigin
+                in
+                wander config wanderConfig defaultSeed wanderAngle source
+                    |> (\( steering, _, _ ) -> steering.linear)
+                    |> Expect.notEqual Nothing
+        , test "produces angular acceleration when not aligned with target" <|
+            \_ ->
+                let
+                    config =
+                        defaultConfig
+
+                    wanderConfig =
+                        defaultWanderConfig
+
+                    wanderAngle =
+                        Angle.radians 1.57
+
+                    source =
+                        atOrigin
+                in
+                wander config wanderConfig defaultSeed wanderAngle source
+                    |> (\( steering, _, _ ) -> steering.angular)
+                    |> Expect.notEqual Nothing
+        , test "updates wander angle" <|
+            \_ ->
+                let
+                    config =
+                        defaultConfig
+
+                    wanderConfig =
+                        defaultWanderConfig
+
+                    initialWanderAngle =
+                        Angle.radians 0
+
+                    source =
+                        atOrigin
+
+                    ( _, newWanderAngle, _ ) =
+                        wander config wanderConfig defaultSeed initialWanderAngle source
+                in
+                newWanderAngle |> Expect.notEqual initialWanderAngle
+        , test "updates random seed" <|
+            \_ ->
+                let
+                    config =
+                        defaultConfig
+
+                    wanderConfig =
+                        defaultWanderConfig
+
+                    wanderAngle =
+                        Angle.radians 0
+
+                    source =
+                        atOrigin
+
+                    initialSeed =
+                        defaultSeed
+
+                    ( _, _, newSeed ) =
+                        wander config wanderConfig initialSeed wanderAngle source
+                in
+                newSeed |> Expect.notEqual initialSeed
+        ]
+
+
+wanderFuzzTests : Test
+wanderFuzzTests =
+    describe "wander behavior - fuzz tests"
+        [ fuzz3 transformFuzzer angleFuzzer seedFuzzer "always respects max acceleration limits" <|
+            \source wanderAngle seed ->
+                let
+                    ( steering, _, _ ) =
+                        wander defaultConfig defaultWanderConfig seed wanderAngle source
+                in
+                case steering.linear of
+                    Just acceleration ->
+                        Quantity.abs acceleration |> expectLessThanOrEqualTo defaultConfig.maxAcceleration
+
+                    Nothing ->
+                        Expect.fail "Wander should always produce linear acceleration"
+        , fuzz3 transformFuzzer angleFuzzer seedFuzzer "respects max angular acceleration limits" <|
+            \source wanderAngle seed ->
+                let
+                    ( steering, _, _ ) =
+                        wander defaultConfig defaultWanderConfig seed wanderAngle source
+                in
+                case steering.angular of
+                    Just angularAcceleration ->
+                        Quantity.abs angularAcceleration |> expectLessThanOrEqualTo defaultConfig.maxAngularAcceleration
+
+                    Nothing ->
+                        Expect.pass
+        , fuzz3 transformFuzzer angleFuzzer seedFuzzer "produces deterministic results for same inputs" <|
+            \source wanderAngle seed ->
+                let
+                    ( steering1, angle1, seed1 ) =
+                        wander defaultConfig defaultWanderConfig seed wanderAngle source
+
+                    ( steering2, angle2, seed2 ) =
+                        wander defaultConfig defaultWanderConfig seed wanderAngle source
+                in
+                Expect.all
+                    [ \_ -> steering1 |> Expect.equal steering2
+                    , \_ -> angle1 |> Expect.equal angle2
+                    , \_ -> seed1 |> Expect.equal seed2
+                    ]
+                    ()
+        ]
+
+
+wanderIntegrationTests : Test
+wanderIntegrationTests =
+    let
+        simulateWanderSteps numSteps initialSeed steeringConfig initialWanderAngle initialTransform =
+            let
+                wanderBehavior transform ( seed, wanderAngle ) =
+                    let
+                        ( steering, nextWanderAngle, nextSeed ) =
+                            wander steeringConfig defaultWanderConfig seed wanderAngle transform
+                    in
+                    ( steering, ( nextSeed, nextWanderAngle ) )
+
+                results =
+                    simulateStepsWithState numSteps wanderBehavior ( initialSeed, initialWanderAngle ) initialTransform
+            in
+            List.map
+                (\{ step, transform, steering, state } ->
+                    let
+                        ( seed, wanderAngle ) =
+                            state
+                    in
+                    { step = step
+                    , transform = transform
+                    , steering = steering
+                    , wanderAngle = wanderAngle
+                    , seed = seed
+                    }
+                )
+                results
+    in
+    describe "wander behavior - integration tests"
+        [ test "creates curved movement paths" <|
+            \_ ->
+                let
+                    initialTransform =
+                        atOrigin
+
+                    initialWanderAngle =
+                        Angle.radians 0
+
+                    trajectory =
+                        simulateWanderSteps 30 defaultSeed defaultConfig initialWanderAngle initialTransform
+
+                    positions =
+                        trajectory |> List.map (.transform >> .position)
+
+                    -- Check that the path isn't a straight line by measuring variance in direction
+                    directions =
+                        positions
+                            |> List.map2 Vector2d.from (List.drop 1 positions)
+                            |> List.map Vector2d.direction
+                            |> List.filterMap identity
+                            |> List.map Direction2d.toAngle
+
+                    hasVariation =
+                        case directions of
+                            first :: rest ->
+                                rest
+                                    |> List.any
+                                        (\angle ->
+                                            angle
+                                                |> Quantity.minus first
+                                                |> Angle.normalize
+                                                |> Quantity.abs
+                                                |> Quantity.greaterThan (Angle.radians 0.1)
+                                        )
+
+                            [] ->
+                                False
+                in
+                if hasVariation then
+                    Expect.pass
+
+                else
+                    Expect.fail "Wander should create curved paths, not straight lines"
+        , test "wander angle evolves over time" <|
+            \_ ->
+                let
+                    initialTransform =
+                        atOrigin
+
+                    seed =
+                        Random.initialSeed 54321
+
+                    initialWanderAngle =
+                        Angle.radians 0
+
+                    trajectory =
+                        simulateWanderSteps 20 seed defaultConfig initialWanderAngle initialTransform
+
+                    wanderAngles =
+                        trajectory |> List.map .wanderAngle
+
+                    finalWanderAngle =
+                        wanderAngles
+                            |> List.reverse
+                            |> List.head
+                            |> Maybe.withDefault initialWanderAngle
+
+                    totalChange =
+                        finalWanderAngle
+                            |> Quantity.minus initialWanderAngle
+                            |> Quantity.abs
+                in
+                totalChange |> expectGreaterThan (Angle.radians 0.05)
+        , test "agent keeps moving forward" <|
+            \_ ->
+                let
+                    initialTransform =
+                        atOrigin
+
+                    seed =
+                        Random.initialSeed 98765
+
+                    initialWanderAngle =
+                        Angle.radians 0
+
+                    trajectory =
+                        simulateWanderSteps 25 seed defaultConfig initialWanderAngle initialTransform
+
+                    positions =
+                        trajectory |> List.map (.transform >> .position)
+
+                    initialPosition =
+                        positions
+                            |> List.head
+                            |> Maybe.withDefault Point2d.origin
+
+                    finalPosition =
+                        positions
+                            |> List.reverse
+                            |> List.head
+                            |> Maybe.withDefault Point2d.origin
+
+                    totalDistance =
+                        Point2d.distanceFrom initialPosition finalPosition
+                in
+                totalDistance |> expectGreaterThan (Length.meters 1.0)
+        ]
+
+
 
 ---
 --- Test helpers
@@ -1089,6 +1389,10 @@ applySteering config delta steering transform =
                 Nothing ->
                     transform.velocity
 
+        nextOrientation =
+            transform.orientation
+                |> Quantity.plus (nextRotation |> Quantity.for delta)
+
         nextRotation =
             case steering.angular of
                 Just angularAcceleration ->
@@ -1099,17 +1403,19 @@ applySteering config delta steering transform =
                     transform.rotation
 
         angle =
-            Angle.inRadians transform.orientation
+            Angle.inRadians nextOrientation
 
         d =
-            nextVelocity |> Quantity.for delta |> Length.inMeters
+            nextVelocity
+                |> Quantity.for delta
+                |> Length.inMeters
 
         offset =
             Vector2d.meters (d * cos angle) (d * sin angle)
     in
     { transform
         | position = Point2d.translateBy offset transform.position
-        , orientation = transform.orientation |> Quantity.plus (nextRotation |> Quantity.for delta)
+        , orientation = nextOrientation
         , velocity = nextVelocity
         , rotation = nextRotation
     }
@@ -1124,48 +1430,64 @@ clampVelocity { minVelocity, maxVelocity } velocity =
 -- Integration
 
 
-type alias SimulationStep =
+type alias SimulationStep state =
     { step : Int
     , transform : Transform2d TestCoordinates
-    , steering : Steering2d.Steering2d
+    , steering : Steering2d
+    , state : state
     }
 
 
 simulateSteps :
     Int
-    -> (Transform2d TestCoordinates -> Steering2d.Steering2d)
+    -> (Transform2d TestCoordinates -> Steering2d)
     -> Transform2d TestCoordinates
-    -> List SimulationStep
+    -> List (SimulationStep ())
 simulateSteps numSteps behaviorFn initialTransform =
-    simulateStepsHelper numSteps behaviorFn initialTransform 0 []
+    simulateStepsWithState numSteps (\transform _ -> ( behaviorFn transform, () )) () initialTransform
+
+
+simulateStepsWithState :
+    Int
+    -> (Transform2d TestCoordinates -> state -> ( Steering2d, state ))
+    -> state
+    -> Transform2d TestCoordinates
+    -> List (SimulationStep state)
+simulateStepsWithState numSteps behaviorFn initialState initialTransform =
+    simulateStepsHelper numSteps behaviorFn initialState initialTransform 0 []
 
 
 simulateStepsHelper :
     Int
-    -> (Transform2d TestCoordinates -> Steering2d.Steering2d)
+    -> (Transform2d TestCoordinates -> state -> ( Steering2d, state ))
+    -> state
     -> Transform2d TestCoordinates
     -> Int
-    -> List SimulationStep
-    -> List SimulationStep
-simulateStepsHelper remaining behaviorFn currentTransform stepNum acc =
+    -> List (SimulationStep state)
+    -> List (SimulationStep state)
+simulateStepsHelper remaining behaviorFn currentState currentTransform stepNum acc =
     if remaining <= 0 then
         List.reverse acc
 
     else
         let
-            steering =
-                behaviorFn currentTransform
+            ( steering, nextState ) =
+                behaviorFn currentTransform currentState
 
             nextTransform =
                 applySteering defaultConfig (Duration.seconds 0.1) steering currentTransform
 
             step =
-                { step = stepNum, transform = currentTransform, steering = steering }
+                { step = stepNum
+                , transform = currentTransform
+                , steering = steering
+                , state = currentState
+                }
         in
-        simulateStepsHelper (remaining - 1) behaviorFn nextTransform (stepNum + 1) (step :: acc)
+        simulateStepsHelper (remaining - 1) behaviorFn nextState nextTransform (stepNum + 1) (step :: acc)
 
 
-distanceToTarget : Point2d Length.Meters TestCoordinates -> SimulationStep -> Length.Length
+distanceToTarget : Point2d Length.Meters TestCoordinates -> SimulationStep state -> Length.Length
 distanceToTarget target step =
     Point2d.distanceFrom step.transform.position target
 

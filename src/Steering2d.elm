@@ -2,6 +2,7 @@ module Steering2d exposing
     ( Steering2d
     , SteeringConfig2d
     , Transform2d
+    , WanderConfig2d
     , accelerate
     , arrive
     , decelerate
@@ -12,17 +13,20 @@ module Steering2d exposing
     , seek
     , stopAtDistance
     , stopRotating
+    , wander
     )
 
 import Acceleration exposing (Acceleration)
 import Angle exposing (Angle)
 import AngularAcceleration exposing (AngularAcceleration)
 import AngularSpeed exposing (AngularSpeed)
+import Circle2d
 import Direction2d
 import Duration
 import Length exposing (Length)
 import Point2d exposing (Point2d)
 import Quantity exposing (Quantity(..))
+import Random
 import Speed exposing (Speed)
 
 
@@ -130,10 +134,61 @@ lookAt config source target =
         }
 
 
+type alias WanderConfig2d =
+    { distance : Length
+    , radius : Length
+    , rate : Float
+    }
+
+
+wander :
+    SteeringConfig2d
+    -> WanderConfig2d
+    -> Random.Seed
+    -> Angle
+    -> Transform2d coords
+    -> ( Steering2d, Angle, Random.Seed )
+wander steeringConfig { distance, radius, rate } seed wanderAngle source =
+    let
+        wanderCircleCenter =
+            Point2d.translateIn
+                (Direction2d.fromAngle source.orientation)
+                distance
+                source.position
+
+        ( angleDelta, nextSeed ) =
+            Random.step (generateAngleDelta -rate rate) seed
+
+        nextWanderAngle =
+            wanderAngle |> Quantity.plus angleDelta
+
+        target =
+            Point2d.translateIn
+                (Direction2d.fromAngle nextWanderAngle)
+                radius
+                wanderCircleCenter
+
+        angularSteering =
+            lookAt steeringConfig source target
+    in
+    ( { linear = Just steeringConfig.maxAcceleration
+      , angular = angularSteering.angular
+      }
+    , nextWanderAngle
+    , nextSeed
+    )
+
+
 
 --
 -- Internals
 --
+
+
+generateAngleDelta : Float -> Float -> Random.Generator Angle
+generateAngleDelta min max =
+    Random.float min max
+        |> Random.map Angle.radians
 
 
 isCloseToZeroVelocity : Speed -> Bool
