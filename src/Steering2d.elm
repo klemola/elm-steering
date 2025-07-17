@@ -1,12 +1,13 @@
 module Steering2d exposing
-    ( Steering2d
+    ( Kinematic2d
+    , Steering2d
     , SteeringConfig2d
-    , Transform2d
     , WanderConfig2d
     , accelerate
     , arrive
     , decelerate
     , lookAt
+    , lookWhereYoureGoing
     , none
     , rotate
     , rotateCounterclockwise
@@ -28,18 +29,19 @@ import Point2d exposing (Point2d)
 import Quantity exposing (Quantity(..))
 import Random
 import Speed exposing (Speed)
+import Vector2d exposing (Vector2d)
 
 
-type alias Steering2d =
-    { linear : Maybe Acceleration
+type alias Steering2d coords =
+    { linear : Maybe (Vector2d Acceleration.MetersPerSecondSquared coords)
     , angular : Maybe AngularAcceleration
     }
 
 
-type alias Transform2d coords =
+type alias Kinematic2d coords =
     { position : Point2d Length.Meters coords
+    , velocity : Vector2d Speed.MetersPerSecond coords
     , orientation : Angle
-    , velocity : Speed
     , rotation : AngularSpeed
     }
 
@@ -54,83 +56,192 @@ type alias SteeringConfig2d =
     }
 
 
-none : Steering2d
+none : Steering2d coords
 none =
     { linear = Nothing
     , angular = Nothing
     }
 
 
-accelerate : SteeringConfig2d -> Steering2d
-accelerate { maxAcceleration } =
-    { linear = Just maxAcceleration
-    , angular = Nothing
-    }
-
-
-decelerate : SteeringConfig2d -> Speed -> Steering2d
-decelerate config currentVelocity =
-    { linear = Just <| reachTargetVelocity config currentVelocity Quantity.zero
-    , angular = Nothing
-    }
-
-
-stopAtDistance : SteeringConfig2d -> Length -> Length -> Speed -> Steering2d
-stopAtDistance config distanceFromTarget threshold currentVelocity =
+accelerate : SteeringConfig2d -> Kinematic2d coords -> Steering2d coords
+accelerate { maxAcceleration } source =
     let
+        velocityDirection =
+            Vector2d.direction source.velocity
+                |> Maybe.withDefault (Direction2d.fromAngle source.orientation)
+    in
+    { linear = Just (Vector2d.withLength maxAcceleration velocityDirection)
+    , angular = Nothing
+    }
+
+
+decelerate : SteeringConfig2d -> Kinematic2d coords -> Steering2d coords
+decelerate config source =
+    case Vector2d.direction source.velocity of
+        Just velocityDirection ->
+            let
+                currentSpeed =
+                    Vector2d.length source.velocity
+
+                decelerationMagnitude =
+                    reachTargetVelocity config currentSpeed Quantity.zero
+
+                decelerationVector =
+                    Vector2d.withLength decelerationMagnitude velocityDirection
+            in
+            { linear = Just decelerationVector
+            , angular = Nothing
+            }
+
+        Nothing ->
+            none
+
+
+stopAtDistance :
+    SteeringConfig2d
+    -> Length
+    -> Length
+    -> Kinematic2d coords
+    -> Steering2d coords
+stopAtDistance config distanceFromTarget threshold source =
+    let
+        currentSpeed =
+            Vector2d.length source.velocity
+
         stopDistance =
             distanceFromTarget |> Quantity.minus threshold
 
-        nextAcceleration =
+        accelerationMagnitude =
             if stopDistance |> Quantity.lessThanOrEqualToZero then
-                reachTargetVelocity config currentVelocity Quantity.zero
+                reachTargetVelocity config currentSpeed Quantity.zero
 
             else
-                accelerateToZeroOverDistance config currentVelocity stopDistance
+                accelerateToZeroOverDistance config currentSpeed stopDistance
+
+        forwardDirection =
+            Direction2d.fromAngle source.orientation
+
+        accelerationVector =
+            Vector2d.withLength accelerationMagnitude forwardDirection
     in
-    { linear = Just nextAcceleration
+    { linear = Just accelerationVector
     , angular = Nothing
     }
 
 
-rotate : SteeringConfig2d -> Steering2d
+rotate : SteeringConfig2d -> Steering2d coords
 rotate { maxAngularAcceleration } =
     { linear = Nothing
     , angular = Just (Quantity.negate maxAngularAcceleration)
     }
 
 
-rotateCounterclockwise : SteeringConfig2d -> Steering2d
+rotateCounterclockwise : SteeringConfig2d -> Steering2d coords
 rotateCounterclockwise { maxAngularAcceleration } =
     { linear = Nothing
     , angular = Just maxAngularAcceleration
     }
 
 
-stopRotating : SteeringConfig2d -> AngularSpeed -> Steering2d
+stopRotating : SteeringConfig2d -> AngularSpeed -> Steering2d coords
 stopRotating config currentRotation =
     { linear = Nothing
     , angular = Just <| reachTargetAngularVelocity config currentRotation Quantity.zero
     }
 
 
-seek : SteeringConfig2d -> Transform2d coords -> Point2d Length.Meters coords -> Steering2d
+lookWhereYoureGoing : SteeringConfig2d -> Kinematic2d coords -> Steering2d coords
+lookWhereYoureGoing config source =
+    if Vector2d.length source.velocity |> Quantity.lessThan (Speed.metersPerSecond 0.1) then
+        none
+
+    else
+        let
+            targetOrientation =
+                Vector2d.direction source.velocity
+                    |> Maybe.map Direction2d.toAngle
+                    |> Maybe.withDefault source.orientation
+        in
+        align config
+            { currentRotation = source.rotation
+            , currentOrientation = source.orientation
+            , targetOrientation = targetOrientation
+            }
+
+
+seek : SteeringConfig2d -> Kinematic2d coords -> Point2d Length.Meters coords -> Steering2d coords
 seek config source target =
-    steerToward config (\_ -> config.maxAcceleration) source target
+    case Direction2d.from source.position target of
+        Just directionToTarget ->
+            { linear = Just (Vector2d.withLength config.maxAcceleration directionToTarget)
+            , angular = Nothing
+            }
+
+        Nothing ->
+            none
 
 
-arrive : SteeringConfig2d -> Transform2d coords -> Point2d Length.Meters coords -> Steering2d
+arrive : SteeringConfig2d -> Kinematic2d coords -> Point2d Length.Meters coords -> Steering2d coords
 arrive config source target =
-    steerToward config (arriveAcceleration config source) source target
+    case Direction2d.from source.position target of
+        Nothing ->
+            none
+
+        Just directionToTarget ->
+            let
+                targetRadius =
+                    Length.meters 0.5
+
+                slowingRadius =
+                    Length.meters 8.0
+
+                timeToTarget =
+                    Duration.seconds 0.1
+
+                distance =
+                    Point2d.distanceFrom source.position target
+            in
+            if distance |> Quantity.lessThan targetRadius then
+                decelerate config source
+
+            else
+                let
+                    targetSpeed =
+                        if distance |> Quantity.lessThan slowingRadius then
+                            config.maxVelocity |> Quantity.multiplyBy (Quantity.ratio distance slowingRadius)
+
+                        else
+                            config.maxVelocity
+
+                    targetVelocity =
+                        Vector2d.withLength targetSpeed directionToTarget
+
+                    acceleration =
+                        targetVelocity
+                            |> Vector2d.minus source.velocity
+                            |> Vector2d.per timeToTarget
+
+                    finalAcceleration =
+                        if Vector2d.length acceleration |> Quantity.greaterThan config.maxAcceleration then
+                            Vector2d.scaleTo config.maxAcceleration acceleration
+
+                        else
+                            acceleration
+                in
+                { linear = Just finalAcceleration
+                , angular = Nothing
+                }
 
 
-lookAt : SteeringConfig2d -> Transform2d coords -> Point2d Length.Meters coords -> Steering2d
+lookAt : SteeringConfig2d -> Kinematic2d coords -> Point2d Length.Meters coords -> Steering2d coords
 lookAt config source target =
     align config
         { currentRotation = source.rotation
         , currentOrientation = source.orientation
         , targetOrientation =
-            Direction2d.from source.position target |> Maybe.withDefault Direction2d.positiveX |> Direction2d.toAngle
+            Direction2d.from source.position target
+                |> Maybe.withDefault Direction2d.positiveX
+                |> Direction2d.toAngle
         }
 
 
@@ -146,35 +257,39 @@ wander :
     -> WanderConfig2d
     -> Random.Seed
     -> Angle
-    -> Transform2d coords
-    -> ( Steering2d, Angle, Random.Seed )
-wander steeringConfig { distance, radius, rate } seed wanderAngle source =
+    -> Kinematic2d coords
+    -> ( Steering2d coords, Angle, Random.Seed )
+wander steeringConfig { distance, radius, rate } seed wanderOrientation source =
     let
-        wanderCircleCenter =
-            Point2d.translateIn
-                (Direction2d.fromAngle source.orientation)
-                distance
-                source.position
-
         ( angleDelta, nextSeed ) =
             Random.step (generateAngleDelta -rate rate) seed
 
-        nextWanderAngle =
-            wanderAngle |> Quantity.plus angleDelta
+        nextWanderOrientation =
+            wanderOrientation |> Quantity.plus angleDelta
+
+        targetOrientation =
+            source.orientation |> Quantity.plus nextWanderOrientation
+
+        forwardDirection =
+            Direction2d.fromAngle source.orientation
+
+        circleCenter =
+            source.position
+                |> Point2d.translateIn forwardDirection distance
 
         target =
-            Point2d.translateIn
-                (Direction2d.fromAngle nextWanderAngle)
-                radius
-                wanderCircleCenter
+            circleCenter |> Point2d.translateIn (Direction2d.fromAngle targetOrientation) radius
 
         angularSteering =
             lookAt steeringConfig source target
+
+        forwardAcceleration =
+            Vector2d.withLength steeringConfig.maxAcceleration forwardDirection
     in
-    ( { linear = Just steeringConfig.maxAcceleration
+    ( { linear = Just forwardAcceleration
       , angular = angularSteering.angular
       }
-    , nextWanderAngle
+    , nextWanderOrientation
     , nextSeed
     )
 
@@ -265,7 +380,7 @@ reachTargetAngularVelocity config currentRotation targetRotation =
 align :
     SteeringConfig2d
     -> { currentRotation : AngularSpeed, currentOrientation : Angle, targetOrientation : Angle }
-    -> Steering2d
+    -> Steering2d coords
 align config { currentRotation, currentOrientation, targetOrientation } =
     let
         targetRadius =
@@ -302,56 +417,3 @@ align config { currentRotation, currentOrientation, targetOrientation } =
         { linear = Nothing
         , angular = Just (reachTargetAngularVelocity config currentRotation targetRotationWithDirection)
         }
-
-
-steerToward :
-    SteeringConfig2d
-    -> (Length -> Acceleration)
-    -> Transform2d coords
-    -> Point2d Length.Meters coords
-    -> Steering2d
-steerToward config accelerationFn source target =
-    case Direction2d.from source.position target of
-        -- The direction is only validated, not used
-        Just _ ->
-            { linear =
-                Point2d.distanceFrom source.position target
-                    |> accelerationFn
-                    |> Just
-            , angular = lookAt config source target |> .angular
-            }
-
-        Nothing ->
-            none
-
-
-arriveAcceleration : SteeringConfig2d -> Transform2d coords -> Length -> Acceleration
-arriveAcceleration config source distance =
-    let
-        timeToTarget =
-            Duration.seconds 0.1
-
-        slowingRadius =
-            Length.meters 8.0
-
-        distanceStep =
-            source.velocity |> Quantity.for timeToTarget
-
-        predictedDistance =
-            distance |> Quantity.minus distanceStep
-
-        effectiveDistance =
-            Quantity.max predictedDistance (Length.meters 0.1)
-
-        targetSpeed =
-            if effectiveDistance |> Quantity.greaterThan slowingRadius then
-                config.maxVelocity
-
-            else
-                let
-                    ratio =
-                        Quantity.ratio effectiveDistance slowingRadius
-                in
-                config.maxVelocity |> Quantity.multiplyBy ratio
-    in
-    reachTargetVelocity config source.velocity targetSpeed

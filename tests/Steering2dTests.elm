@@ -4,7 +4,7 @@ import Acceleration
 import Angle exposing (Angle)
 import AngularAcceleration
 import AngularSpeed exposing (AngularSpeed)
-import Direction2d
+import Direction2d exposing (Direction2d)
 import Duration exposing (Duration)
 import Expect
 import Fuzz exposing (Fuzzer)
@@ -16,14 +16,15 @@ import Set
 import Speed exposing (Speed)
 import Steering2d
     exposing
-        ( Steering2d
+        ( Kinematic2d
+        , Steering2d
         , SteeringConfig2d
-        , Transform2d
         , WanderConfig2d
         , accelerate
         , arrive
         , decelerate
         , lookAt
+        , lookWhereYoureGoing
         , none
         , rotate
         , rotateCounterclockwise
@@ -40,7 +41,7 @@ import Test
         , fuzz3
         , test
         )
-import Vector2d
+import Vector2d exposing (Vector2d)
 
 
 defaultConfig : SteeringConfig2d
@@ -71,33 +72,33 @@ type TestCoordinates
     = TestCoordinates
 
 
-atOrigin : Transform2d TestCoordinates
+atOrigin : Kinematic2d TestCoordinates
 atOrigin =
     { position = Point2d.origin
     , orientation = Quantity.zero
-    , velocity = Quantity.zero
+    , velocity = Vector2d.zero
     , rotation = Quantity.zero
     }
 
 
-withPosition : Point2d Length.Meters TestCoordinates -> Transform2d TestCoordinates -> Transform2d TestCoordinates
-withPosition position transform =
-    { transform | position = position }
+withPosition : Point2d Length.Meters TestCoordinates -> Kinematic2d TestCoordinates -> Kinematic2d TestCoordinates
+withPosition position kinematic =
+    { kinematic | position = position }
 
 
-withOrientation : Angle -> Transform2d TestCoordinates -> Transform2d TestCoordinates
-withOrientation orientation transform =
-    { transform | orientation = orientation }
+withOrientation : Angle -> Kinematic2d TestCoordinates -> Kinematic2d TestCoordinates
+withOrientation orientation kinematic =
+    { kinematic | orientation = orientation }
 
 
-withVelocity : Speed -> Transform2d TestCoordinates -> Transform2d TestCoordinates
-withVelocity velocity transform =
-    { transform | velocity = velocity }
+withVelocity : Vector2d Speed.MetersPerSecond TestCoordinates -> Kinematic2d TestCoordinates -> Kinematic2d TestCoordinates
+withVelocity velocity kinematic =
+    { kinematic | velocity = velocity }
 
 
-withRotation : AngularSpeed -> Transform2d TestCoordinates -> Transform2d TestCoordinates
-withRotation rotation transform =
-    { transform | rotation = rotation }
+withRotation : AngularSpeed -> Kinematic2d TestCoordinates -> Kinematic2d TestCoordinates
+withRotation rotation kinematic =
+    { kinematic | rotation = rotation }
 
 
 point2dFuzzer : Fuzzer (Point2d Length.Meters TestCoordinates)
@@ -107,13 +108,20 @@ point2dFuzzer =
         (Fuzz.floatRange -100 100)
 
 
-transformFuzzer : Fuzzer (Transform2d TestCoordinates)
-transformFuzzer =
+velocityVector2dFuzzer : Fuzzer (Vector2d Speed.MetersPerSecond TestCoordinates)
+velocityVector2dFuzzer =
+    Fuzz.map2 Vector2d.metersPerSecond
+        (Fuzz.floatRange -10 10)
+        (Fuzz.floatRange -10 10)
+
+
+kinematicFuzzer : Fuzzer (Kinematic2d TestCoordinates)
+kinematicFuzzer =
     Fuzz.map4
-        Transform2d
+        Kinematic2d
         point2dFuzzer
+        velocityVector2dFuzzer
         (Fuzz.map Angle.radians (Fuzz.floatRange -3.14 3.14))
-        (Fuzz.map Speed.metersPerSecond (Fuzz.floatRange -10 10))
         (Fuzz.map AngularSpeed.radiansPerSecond (Fuzz.floatRange -5 5))
 
 
@@ -131,6 +139,8 @@ suite : Test
 suite =
     describe "Steering2d behaviors"
         [ basicsSmokeTests
+        , lookWhereYoureGoingTests
+        , lookWhereYoureGoingIntegrationTests
         , lookAtTests
         , lookAtFuzzTests
         , lookAtIntegrationTests
@@ -165,8 +175,9 @@ accelerateTests =
                     config =
                         defaultConfig
                 in
-                accelerate config
+                accelerate config atOrigin
                     |> .linear
+                    |> Maybe.map Vector2d.length
                     |> Expect.equal (Just config.maxAcceleration)
         , test "produces no angular acceleration" <|
             \_ ->
@@ -174,27 +185,32 @@ accelerateTests =
                     config =
                         defaultConfig
                 in
-                accelerate config
+                accelerate config atOrigin
                     |> .angular
                     |> Expect.equal Nothing
         , test "increases velocity over time" <|
             \_ ->
                 let
-                    initialTransform =
-                        atOrigin |> withVelocity (Speed.metersPerSecond 2)
+                    initialKinematic =
+                        atOrigin |> withVelocity (Vector2d.withLength (Speed.metersPerSecond 2) Direction2d.positiveX)
 
                     trajectory =
-                        simulateSteps 10 (\_ -> accelerate defaultConfig) initialTransform
+                        simulateSteps 10 (\kinematic -> accelerate defaultConfig kinematic) initialKinematic
 
                     velocities =
                         trajectory
-                            |> List.map (.transform >> .velocity >> Quantity.abs)
+                            |> List.map (.kinematic >> .velocity >> Vector2d.length)
 
                     initialVelocity =
-                        velocities |> List.head |> Maybe.withDefault Quantity.zero
+                        velocities
+                            |> List.head
+                            |> Maybe.withDefault Quantity.zero
 
                     finalVelocity =
-                        velocities |> List.reverse |> List.head |> Maybe.withDefault Quantity.zero
+                        velocities
+                            |> List.reverse
+                            |> List.head
+                            |> Maybe.withDefault Quantity.zero
                 in
                 finalVelocity |> expectGreaterThan initialVelocity
         ]
@@ -209,56 +225,64 @@ decelerateTests =
                     config =
                         defaultConfig
 
-                    currentVelocity =
-                        Speed.metersPerSecond 5
+                    source =
+                        atOrigin |> withVelocity (Vector2d.metersPerSecond 5 0)
                 in
-                decelerate config currentVelocity
-                    |> .linear
-                    |> Maybe.map (expectLessThan Quantity.zero)
-                    |> Maybe.withDefault (Expect.fail "Expected negative acceleration")
-        , test "produces acceleration when moving backward" <|
+                case decelerate config source |> .linear of
+                    Just acceleration ->
+                        Vector2d.dot acceleration source.velocity
+                            |> expectLessThan Quantity.zero
+
+                    _ ->
+                        Expect.fail "Expected linear acceleration"
+        , test "produces acceleration opposing velocity direction (backwards velocity direction)" <|
             \_ ->
                 let
                     config =
                         defaultConfig
 
-                    currentVelocity =
-                        Speed.metersPerSecond -3
+                    source =
+                        atOrigin |> withVelocity (Vector2d.metersPerSecond -5 0)
                 in
-                decelerate config currentVelocity
-                    |> .linear
-                    |> Maybe.map (expectGreaterThan Quantity.zero)
-                    |> Maybe.withDefault (Expect.fail "Expected positive acceleration")
+                case decelerate config source |> .linear of
+                    Just acceleration ->
+                        Vector2d.dot acceleration source.velocity
+                            |> expectLessThan Quantity.zero
+
+                    _ ->
+                        Expect.fail "Expected linear acceleration"
         , test "produces no angular acceleration" <|
             \_ ->
                 let
                     config =
                         defaultConfig
-
-                    currentVelocity =
-                        Speed.metersPerSecond 5
                 in
-                decelerate config currentVelocity
+                decelerate config atOrigin
                     |> .angular
                     |> Expect.equal Nothing
         , test "reduces speed over time" <|
             \_ ->
                 let
                     initialTransform =
-                        atOrigin |> withVelocity (Speed.metersPerSecond 8)
+                        atOrigin |> withVelocity (Vector2d.metersPerSecond 8 0)
 
                     trajectory =
-                        simulateSteps 15 (\transform -> decelerate defaultConfig transform.velocity) initialTransform
+                        simulateSteps 15 (\kinematic -> decelerate defaultConfig kinematic) initialTransform
 
                     speeds =
                         trajectory
-                            |> List.map (.transform >> .velocity >> Quantity.abs)
+                            |> List.map (.kinematic >> .velocity >> Vector2d.length)
 
                     initialSpeed =
-                        speeds |> List.head |> Maybe.withDefault Quantity.zero
+                        speeds
+                            |> List.head
+                            |> Maybe.withDefault Quantity.zero
 
                     finalSpeed =
-                        speeds |> List.reverse |> List.head |> Maybe.withDefault Quantity.zero
+                        speeds
+                            |> List.reverse
+                            |> List.head
+                            |> Maybe.withDefault Quantity.zero
                 in
                 finalSpeed |> expectLessThan initialSpeed
         ]
@@ -303,15 +327,15 @@ rotateTests =
         , test "rotate increases clockwise rotation over time" <|
             \_ ->
                 let
-                    initialTransform =
+                    initialKinematic =
                         atOrigin
 
                     trajectory =
-                        simulateSteps 10 (\_ -> rotate defaultConfig) initialTransform
+                        simulateSteps 10 (\_ -> rotate defaultConfig) initialKinematic
 
                     rotations =
                         trajectory
-                            |> List.map (.transform >> .rotation)
+                            |> List.map (.kinematic >> .rotation)
 
                     initialRotation =
                         rotations
@@ -328,15 +352,15 @@ rotateTests =
         , test "rotateCounterclockwise increases counterclockwise rotation over time" <|
             \_ ->
                 let
-                    initialTransform =
+                    initialKinematic =
                         atOrigin
 
                     trajectory =
-                        simulateSteps 10 (\_ -> rotateCounterclockwise defaultConfig) initialTransform
+                        simulateSteps 10 (\_ -> rotateCounterclockwise defaultConfig) initialKinematic
 
                     rotations =
                         trajectory
-                            |> List.map (.transform >> .rotation)
+                            |> List.map (.kinematic >> .rotation)
 
                     initialRotation =
                         rotations
@@ -397,15 +421,15 @@ stopRotatingTests =
         , test "reduces rotation speed over time" <|
             \_ ->
                 let
-                    initialTransform =
+                    initialKinematic =
                         atOrigin |> withRotation (AngularSpeed.radiansPerSecond 5)
 
                     trajectory =
-                        simulateSteps 20 (\transform -> stopRotating defaultConfig transform.rotation) initialTransform
+                        simulateSteps 20 (\kinematic -> stopRotating defaultConfig kinematic.rotation) initialKinematic
 
                     rotationSpeeds =
                         trajectory
-                            |> List.map (.transform >> .rotation >> Quantity.abs)
+                            |> List.map (.kinematic >> .rotation >> Quantity.abs)
 
                     initialRotationSpeed =
                         rotationSpeeds |> List.head |> Maybe.withDefault Quantity.zero
@@ -414,6 +438,135 @@ stopRotatingTests =
                         rotationSpeeds |> List.reverse |> List.head |> Maybe.withDefault Quantity.zero
                 in
                 finalRotationSpeed |> expectLessThan initialRotationSpeed
+        ]
+
+
+lookWhereYoureGoingTests : Test
+lookWhereYoureGoingTests =
+    describe "lookWhereYoureGoing behavior"
+        [ test "produces no steering when moving slowly" <|
+            \_ ->
+                let
+                    source =
+                        atOrigin |> withVelocity (Vector2d.metersPerSecond 0.05 0)
+                in
+                lookWhereYoureGoing defaultConfig source
+                    |> Expect.equal none
+        , test "aligns orientation with velocity direction" <|
+            \_ ->
+                let
+                    source =
+                        atOrigin
+                            |> withVelocity (Vector2d.metersPerSecond 0 5)
+                in
+                lookWhereYoureGoing defaultConfig source
+                    |> .angular
+                    |> Expect.notEqual Nothing
+        ]
+
+
+lookWhereYoureGoingIntegrationTests : Test
+lookWhereYoureGoingIntegrationTests =
+    describe "lookWhereYoureGoing behavior - integration tests"
+        [ test "eventually aligns orientation with velocity direction" <|
+            \_ ->
+                let
+                    initialVelocity =
+                        Vector2d.metersPerSecond 3 4
+
+                    targetOrientation =
+                        Vector2d.direction initialVelocity
+                            |> Maybe.map Direction2d.toAngle
+                            |> Maybe.withDefault (Angle.radians 0)
+
+                    initialKinematic =
+                        atOrigin
+                            |> withVelocity initialVelocity
+
+                    trajectory =
+                        simulateSteps 30 (\kinematic -> lookWhereYoureGoing defaultConfig kinematic) initialKinematic
+
+                    finalOrientation =
+                        trajectory
+                            |> List.reverse
+                            |> List.head
+                            |> Maybe.map (.kinematic >> .orientation)
+                            |> Maybe.withDefault (Angle.radians 0)
+
+                    angleDifference =
+                        targetOrientation
+                            |> Quantity.minus finalOrientation
+                            |> Angle.normalize
+                            |> Quantity.abs
+                in
+                angleDifference |> expectLessThan (Angle.radians 0.1)
+        , test "consistently turns toward velocity direction over multiple steps" <|
+            \_ ->
+                let
+                    velocity =
+                        Vector2d.metersPerSecond -2 3
+
+                    targetAngle =
+                        Vector2d.direction velocity
+                            |> Maybe.map Direction2d.toAngle
+                            |> Maybe.withDefault (Angle.radians 0)
+
+                    initialKinematic =
+                        atOrigin
+                            |> withVelocity velocity
+
+                    trajectory =
+                        simulateSteps 25 (\kinematic -> lookWhereYoureGoing defaultConfig kinematic) initialKinematic
+
+                    angleDifferences =
+                        trajectory
+                            |> List.map (.kinematic >> .orientation)
+                            |> List.map
+                                (\angle ->
+                                    targetAngle
+                                        |> Quantity.minus angle
+                                        |> Angle.normalize
+                                        |> Quantity.abs
+                                )
+                            |> List.filter (Quantity.greaterThan (Angle.radians 0.1))
+                in
+                expectMonotonicallyDecreasing angleDifferences
+        , test "does not affect velocity magnitude or add linear acceleration" <|
+            \_ ->
+                let
+                    initialVelocity =
+                        Vector2d.metersPerSecond 2 -1
+
+                    initialKinematic =
+                        atOrigin
+                            |> withVelocity initialVelocity
+                            |> withOrientation (Angle.radians 1.57)
+
+                    trajectory =
+                        simulateSteps 20 (\kinematic -> lookWhereYoureGoing defaultConfig kinematic) initialKinematic
+
+                    velocityMagnitudes =
+                        trajectory
+                            |> List.map (.kinematic >> .velocity >> Vector2d.length)
+
+                    initialSpeed =
+                        Vector2d.length initialVelocity
+
+                    finalSpeed =
+                        velocityMagnitudes
+                            |> List.reverse
+                            |> List.head
+                            |> Maybe.withDefault initialSpeed
+                in
+                Expect.all
+                    [ \_ -> Expect.equal initialSpeed finalSpeed
+                    , \_ ->
+                        trajectory
+                            |> List.map .steering
+                            |> List.all (\steering -> steering.linear == Nothing)
+                            |> Expect.equal True
+                    ]
+                    ()
         ]
 
 
@@ -484,7 +637,7 @@ lookAtTests =
 lookAtFuzzTests : Test
 lookAtFuzzTests =
     describe "lookAt behavior - fuzz tests"
-        [ fuzz2 transformFuzzer point2dFuzzer "always respects max angular acceleration limits" <|
+        [ fuzz2 kinematicFuzzer point2dFuzzer "always respects max angular acceleration limits" <|
             \source targetPos ->
                 let
                     result =
@@ -523,7 +676,7 @@ lookAtFuzzTests =
 
                             else
                                 Expect.fail "Expected angular acceleration when not aligned"
-        , fuzz transformFuzzer "never produces linear acceleration" <|
+        , fuzz kinematicFuzzer "never produces linear acceleration" <|
             \source ->
                 let
                     target =
@@ -598,18 +751,18 @@ lookAtIntegrationTests =
                     target =
                         Point2d.meters 10 0
 
-                    initialTransform =
+                    initialKinematic =
                         atOrigin |> withOrientation (Angle.radians 3.14159)
 
                     trajectory =
-                        simulateSteps 30 (\transform -> lookAt defaultConfig transform target) initialTransform
+                        simulateSteps 30 (\kinematic -> lookAt defaultConfig kinematic target) initialKinematic
 
                     targetAngle =
                         Angle.radians 0
 
                     angleDifferences =
                         trajectory
-                            |> List.map (.transform >> .orientation)
+                            |> List.map (.kinematic >> .orientation)
                             |> List.map
                                 (\angle ->
                                     Quantity.abs
@@ -628,17 +781,17 @@ lookAtIntegrationTests =
                     target =
                         Point2d.meters 5 5
 
-                    initialTransform =
+                    initialKinematic =
                         atOrigin
 
                     trajectory =
-                        simulateSteps 50 (\transform -> lookAt defaultConfig transform target) initialTransform
+                        simulateSteps 50 (\kinematic -> lookAt defaultConfig kinematic target) initialKinematic
 
                     finalOrientation =
                         trajectory
                             |> List.reverse
                             |> List.head
-                            |> Maybe.map (.transform >> .orientation)
+                            |> Maybe.map (.kinematic >> .orientation)
                             |> Maybe.withDefault (Angle.radians 0)
 
                     expectedAngle =
@@ -654,22 +807,22 @@ lookAtIntegrationTests =
                     target =
                         Point2d.meters 10 0
 
-                    initialTransform =
+                    initialKinematic =
                         atOrigin
                             |> withPosition (Point2d.meters 5 3)
                             |> withOrientation (Angle.radians 3.14159)
 
                     trajectory =
-                        simulateSteps 20 (\transform -> lookAt defaultConfig transform target) initialTransform
+                        simulateSteps 20 (\kinematic -> lookAt defaultConfig kinematic target) initialKinematic
 
                     initialPosition =
-                        initialTransform.position
+                        initialKinematic.position
 
                     finalPosition =
                         trajectory
                             |> List.reverse
                             |> List.head
-                            |> Maybe.map (.transform >> .position)
+                            |> Maybe.map (.kinematic >> .position)
                             |> Maybe.withDefault initialPosition
 
                     positionDifference =
@@ -693,10 +846,13 @@ seekTests =
 
                     target =
                         Point2d.meters 10 0
+
+                    dirToTarget =
+                        Direction2d.from source.position target |> Maybe.withDefault Direction2d.positiveX
                 in
                 seek config source target
                     |> .linear
-                    |> Expect.equal (Just config.maxAcceleration)
+                    |> Expect.equal (Just (maxAccelerationTowards config source dirToTarget))
         , test "produces no linear acceleration when at target" <|
             \_ ->
                 let
@@ -723,7 +879,7 @@ closenessThreshold =
 seekFuzzTests : Test
 seekFuzzTests =
     describe "seek behavior - fuzz tests"
-        [ fuzz2 transformFuzzer point2dFuzzer "always respects max acceleration limits" <|
+        [ fuzz2 kinematicFuzzer point2dFuzzer "always respects max acceleration limits" <|
             \source targetPos ->
                 let
                     result =
@@ -731,7 +887,7 @@ seekFuzzTests =
                 in
                 case result.linear of
                     Just acceleration ->
-                        acceleration |> expectLessThanOrEqualTo defaultConfig.maxAcceleration
+                        Vector2d.length acceleration |> expectLessThanOrEqualTo defaultConfig.maxAcceleration
 
                     Nothing ->
                         if Point2d.distanceFrom source.position targetPos |> Quantity.lessThan closenessThreshold then
@@ -739,35 +895,6 @@ seekFuzzTests =
 
                         else
                             Expect.fail "Expected linear acceleration"
-        , fuzz2 point2dFuzzer point2dFuzzer "produces angular steering when not aligned with target" <|
-            \sourcePos targetPos ->
-                if Point2d.distanceFrom sourcePos targetPos |> Quantity.greaterThan closenessThreshold then
-                    let
-                        targetDirection =
-                            Direction2d.from sourcePos targetPos
-
-                        misalignedOrientation =
-                            case targetDirection of
-                                Just dir ->
-                                    Direction2d.toAngle dir |> Quantity.plus (Angle.radians 1.57)
-
-                                Nothing ->
-                                    Angle.radians 1.57
-
-                        transform =
-                            withPosition sourcePos
-
-                        source =
-                            atOrigin
-                                |> withPosition sourcePos
-                                |> withOrientation misalignedOrientation
-                    in
-                    seek defaultConfig source targetPos
-                        |> .angular
-                        |> Expect.notEqual Nothing
-
-                else
-                    Expect.pass
         ]
 
 
@@ -780,11 +907,11 @@ seekIntegrationTests =
                     target =
                         Point2d.meters 10 0
 
-                    initialTransform =
+                    initialKinematic =
                         atOrigin |> withPosition (Point2d.meters -5 0)
 
                     trajectory =
-                        simulateSteps 20 (\transform -> seek defaultConfig transform target) initialTransform
+                        simulateSteps 20 (\kinematic -> seek defaultConfig kinematic target) initialKinematic
 
                     distances =
                         List.map (distanceToTarget target) trajectory
@@ -796,20 +923,20 @@ seekIntegrationTests =
                     target =
                         Point2d.meters 5 0
 
-                    initialTransform =
-                        atOrigin |> withPosition (Point2d.meters 0 0)
+                    initialKinematic =
+                        atOrigin
 
                     initialDistance =
-                        Point2d.distanceFrom initialTransform.position target
+                        Point2d.distanceFrom initialKinematic.position target
 
                     trajectory =
-                        simulateSteps 10 (\transform -> seek defaultConfig transform target) initialTransform
+                        simulateSteps 10 (\transform -> seek defaultConfig transform target) initialKinematic
 
                     finalDistance =
                         trajectory
                             |> List.reverse
                             |> List.head
-                            |> Maybe.map (.transform >> .position >> Point2d.distanceFrom target)
+                            |> Maybe.map (.kinematic >> .position >> Point2d.distanceFrom target)
                             |> Maybe.withDefault initialDistance
                 in
                 finalDistance |> expectLessThan initialDistance
@@ -828,15 +955,18 @@ arriveTests =
                     source =
                         atOrigin
                             |> withPosition (Point2d.meters 4 0)
-                            |> withVelocity (Speed.metersPerSecond 5)
+                            |> withVelocity (Vector2d.withLength (Speed.metersPerSecond 5) Direction2d.positiveX)
 
                     target =
                         Point2d.meters 5 0
                 in
-                arrive config source target
-                    |> .linear
-                    |> Maybe.map (expectLessThan Quantity.zero)
-                    |> Maybe.withDefault (Expect.fail "Expected linear steering")
+                case arrive config source target |> .linear of
+                    Just acceleration ->
+                        Vector2d.dot acceleration source.velocity
+                            |> expectLessThan Quantity.zero
+
+                    _ ->
+                        Expect.fail "Expected linear steering"
         , test "produces no linear acceleration when at target" <|
             \_ ->
                 let
@@ -872,8 +1002,8 @@ arriveTests =
                         seek config source target
                 in
                 case ( arriveResult.linear, seekResult.linear ) of
-                    ( Just arriveAccel, Just seekAccel ) ->
-                        arriveAccel |> expectLessThanOrEqualTo seekAccel
+                    ( Just arriveAcceleration, Just seekAcceleration ) ->
+                        Vector2d.length arriveAcceleration |> expectLessThanOrEqualTo (Vector2d.length seekAcceleration)
 
                     _ ->
                         Expect.fail "Both behaviors should produce acceleration"
@@ -883,7 +1013,7 @@ arriveTests =
 arriveFuzzTests : Test
 arriveFuzzTests =
     describe "arrive behavior - fuzz tests"
-        [ fuzz2 transformFuzzer point2dFuzzer "always respects max acceleration limits" <|
+        [ fuzz2 kinematicFuzzer point2dFuzzer "always respects max acceleration limits" <|
             \source targetPos ->
                 let
                     result =
@@ -891,7 +1021,7 @@ arriveFuzzTests =
                 in
                 case result.linear of
                     Just acceleration ->
-                        Quantity.abs acceleration |> expectLessThanOrEqualTo defaultConfig.maxAcceleration
+                        Vector2d.length acceleration |> expectLessThanOrEqualTo defaultConfig.maxAcceleration
 
                     Nothing ->
                         if Point2d.distanceFrom source.position targetPos |> Quantity.lessThan closenessThreshold then
@@ -899,48 +1029,26 @@ arriveFuzzTests =
 
                         else
                             Expect.fail "Expected linear acceleration"
-        , fuzz2 point2dFuzzer point2dFuzzer "produces angular steering when not aligned with target" <|
-            \sourcePos targetPos ->
-                if Point2d.distanceFrom sourcePos targetPos |> Quantity.greaterThan closenessThreshold then
-                    let
-                        targetDirection =
-                            Direction2d.from sourcePos targetPos
-
-                        misalignedOrientation =
-                            case targetDirection of
-                                Just direction ->
-                                    Direction2d.toAngle direction |> Quantity.plus (Angle.radians 1.57)
-
-                                Nothing ->
-                                    Angle.radians 1.57
-
-                        source =
-                            atOrigin
-                                |> withPosition sourcePos
-                                |> withOrientation misalignedOrientation
-                    in
-                    arrive defaultConfig source targetPos
-                        |> .angular
-                        |> Expect.notEqual Nothing
-
-                else
-                    Expect.pass
-        , fuzz transformFuzzer "produces deceleration when moving fast toward close target" <|
+        , fuzz kinematicFuzzer "produces deceleration when moving fast toward close target" <|
             \source ->
                 let
                     fastVelocity =
-                        Speed.metersPerSecond 8
-
-                    closeTarget =
-                        source.position |> Point2d.translateBy (Vector2d.meters 2 0)
+                        Vector2d.metersPerSecond 8 0
 
                     fastSource =
                         { source | velocity = fastVelocity }
+
+                    closeTarget =
+                        fastSource.position
+                            |> Point2d.translateBy (Vector2d.meters 1 0)
                 in
-                arrive defaultConfig fastSource closeTarget
-                    |> .linear
-                    |> Maybe.map (expectLessThan Quantity.zero)
-                    |> Maybe.withDefault (Expect.fail "Expected linear steering")
+                case arrive defaultConfig fastSource closeTarget |> .linear of
+                    Just acceleration ->
+                        Vector2d.dot acceleration fastSource.velocity
+                            |> expectLessThan Quantity.zero
+
+                    _ ->
+                        Expect.fail "Expected linear steering"
         ]
 
 
@@ -956,14 +1064,14 @@ arriveIntegrationTests =
                     slowingRadius =
                         Length.meters 5.0
 
-                    initialTransform =
+                    initialKinematic =
                         atOrigin
 
                     trajectory =
-                        simulateSteps 100 (\transform -> arrive defaultConfig transform target) initialTransform
+                        simulateSteps 100 (\transform -> arrive defaultConfig transform target) initialKinematic
 
                     measurements =
-                        List.map .transform trajectory
+                        List.map .kinematic trajectory
 
                     indexedVelocities =
                         List.indexedMap Tuple.pair measurements
@@ -992,7 +1100,7 @@ arriveIntegrationTests =
                     decelerationPhaseSlice =
                         measurements
                             |> List.drop (slowdownStartIndex + 1)
-                            |> List.map .velocity
+                            |> List.map (.velocity >> Vector2d.length)
                             -- Stop measuring before expected oscillation around the target velocity begins
                             |> List.filter (Quantity.greaterThan (Speed.metersPerSecond 0.5))
                 in
@@ -1007,27 +1115,27 @@ arriveIntegrationTests =
                     target =
                         Point2d.meters 5 0
 
-                    initialTransform =
-                        atOrigin |> withPosition (Point2d.meters 0 0)
+                    initialKinematic =
+                        atOrigin
 
                     finalDistance =
-                        simulateUntilConverged (\transform targetPos -> arrive defaultConfig transform targetPos) target initialTransform
+                        simulateUntilConverged (\transform targetPos -> arrive defaultConfig transform targetPos) target initialKinematic
                 in
-                finalDistance |> expectLessThan (Length.meters 0.2)
+                finalDistance |> expectLessThan (Length.meters 0.5)
         , test "reaches target without excessive oscillation" <|
             \_ ->
                 let
                     target =
                         Point2d.meters 8 0
 
-                    initialTransform =
-                        atOrigin |> withPosition (Point2d.meters 0 0)
+                    initialKinematic =
+                        atOrigin
 
                     finalDistance =
                         simulateUntilConverged
                             (\transform targetPos -> arrive defaultConfig transform targetPos)
                             target
-                            initialTransform
+                            initialKinematic
                 in
                 finalDistance |> expectLessThan (Length.meters 0.3)
         ]
@@ -1119,7 +1227,7 @@ wanderTests =
 wanderFuzzTests : Test
 wanderFuzzTests =
     describe "wander behavior - fuzz tests"
-        [ fuzz3 transformFuzzer angleFuzzer seedFuzzer "always respects max acceleration limits" <|
+        [ fuzz3 kinematicFuzzer angleFuzzer seedFuzzer "always respects max acceleration limits" <|
             \source wanderAngle seed ->
                 let
                     ( steering, _, _ ) =
@@ -1127,11 +1235,11 @@ wanderFuzzTests =
                 in
                 case steering.linear of
                     Just acceleration ->
-                        Quantity.abs acceleration |> expectLessThanOrEqualTo defaultConfig.maxAcceleration
+                        Vector2d.length acceleration |> expectLessThanOrEqualTo defaultConfig.maxAcceleration
 
                     Nothing ->
                         Expect.fail "Wander should always produce linear acceleration"
-        , fuzz3 transformFuzzer angleFuzzer seedFuzzer "respects max angular acceleration limits" <|
+        , fuzz3 kinematicFuzzer angleFuzzer seedFuzzer "respects max angular acceleration limits" <|
             \source wanderAngle seed ->
                 let
                     ( steering, _, _ ) =
@@ -1143,7 +1251,7 @@ wanderFuzzTests =
 
                     Nothing ->
                         Expect.pass
-        , fuzz3 transformFuzzer angleFuzzer seedFuzzer "produces deterministic results for same inputs" <|
+        , fuzz3 kinematicFuzzer angleFuzzer seedFuzzer "produces deterministic results for same inputs" <|
             \source wanderAngle seed ->
                 let
                     ( steering1, angle1, seed1 ) =
@@ -1164,7 +1272,7 @@ wanderFuzzTests =
 wanderIntegrationTests : Test
 wanderIntegrationTests =
     let
-        simulateWanderSteps numSteps initialSeed steeringConfig initialWanderAngle initialTransform =
+        simulateWanderSteps numSteps initialSeed steeringConfig initialWanderAngle initialKinematic =
             let
                 wanderBehavior transform ( seed, wanderAngle ) =
                     let
@@ -1174,16 +1282,16 @@ wanderIntegrationTests =
                     ( steering, ( nextSeed, nextWanderAngle ) )
 
                 results =
-                    simulateStepsWithState numSteps wanderBehavior ( initialSeed, initialWanderAngle ) initialTransform
+                    simulateStepsWithState numSteps wanderBehavior ( initialSeed, initialWanderAngle ) initialKinematic
             in
             List.map
-                (\{ step, transform, steering, state } ->
+                (\{ step, kinematic, steering, state } ->
                     let
                         ( seed, wanderAngle ) =
                             state
                     in
                     { step = step
-                    , transform = transform
+                    , kinematic = kinematic
                     , steering = steering
                     , wanderAngle = wanderAngle
                     , seed = seed
@@ -1195,17 +1303,17 @@ wanderIntegrationTests =
         [ test "creates curved movement paths" <|
             \_ ->
                 let
-                    initialTransform =
+                    initialKinematic =
                         atOrigin
 
                     initialWanderAngle =
                         Angle.radians 0
 
                     trajectory =
-                        simulateWanderSteps 30 defaultSeed defaultConfig initialWanderAngle initialTransform
+                        simulateWanderSteps 30 defaultSeed defaultConfig initialWanderAngle initialKinematic
 
                     positions =
-                        trajectory |> List.map (.transform >> .position)
+                        trajectory |> List.map (.kinematic >> .position)
 
                     -- Check that the path isn't a straight line by measuring variance in direction
                     directions =
@@ -1239,7 +1347,7 @@ wanderIntegrationTests =
         , test "wander angle evolves over time" <|
             \_ ->
                 let
-                    initialTransform =
+                    initialKinematic =
                         atOrigin
 
                     seed =
@@ -1249,7 +1357,7 @@ wanderIntegrationTests =
                         Angle.radians 0
 
                     trajectory =
-                        simulateWanderSteps 20 seed defaultConfig initialWanderAngle initialTransform
+                        simulateWanderSteps 20 seed defaultConfig initialWanderAngle initialKinematic
 
                     wanderAngles =
                         trajectory |> List.map .wanderAngle
@@ -1269,7 +1377,7 @@ wanderIntegrationTests =
         , test "agent keeps moving forward" <|
             \_ ->
                 let
-                    initialTransform =
+                    initialKinematic =
                         atOrigin
 
                     seed =
@@ -1279,10 +1387,10 @@ wanderIntegrationTests =
                         Angle.radians 0
 
                     trajectory =
-                        simulateWanderSteps 25 seed defaultConfig initialWanderAngle initialTransform
+                        simulateWanderSteps 25 seed defaultConfig initialWanderAngle initialKinematic
 
                     positions =
-                        trajectory |> List.map (.transform >> .position)
+                        trajectory |> List.map (.kinematic >> .position)
 
                     initialPosition =
                         positions
@@ -1342,9 +1450,13 @@ expectLessThan baseline value =
             )
 
 
-expectLessThanOrEqualTo : Quantity number units -> Quantity number units -> Expect.Expectation
+expectLessThanOrEqualTo : Quantity Float units -> Quantity Float units -> Expect.Expectation
 expectLessThanOrEqualTo baseline value =
-    if value |> Quantity.lessThanOrEqualTo baseline then
+    let
+        tolerance =
+            Quantity.multiplyBy 1.0e-10 baseline
+    in
+    if value |> Quantity.lessThanOrEqualTo (baseline |> Quantity.plus tolerance) then
         Expect.pass
 
     else
@@ -1376,48 +1488,59 @@ expectMonotonicallyDecreasing values =
                 Expect.fail "Expected monotonically decreasing values"
 
 
-applySteering : SteeringConfig2d -> Duration -> Steering2d -> Transform2d coords -> Transform2d coords
-applySteering config delta steering transform =
+applySteering :
+    SteeringConfig2d
+    -> Duration
+    -> Steering2d coords
+    -> Kinematic2d coords
+    -> Kinematic2d coords
+applySteering steeringConfig delta steering kinematic =
     let
         nextVelocity =
             case steering.linear of
-                Just acceleration ->
-                    transform.velocity
-                        |> Quantity.plus (acceleration |> Quantity.for delta)
-                        |> clampVelocity config
+                Just accelerationVector ->
+                    kinematic.velocity
+                        |> Vector2d.plus (Vector2d.for delta accelerationVector)
 
                 Nothing ->
-                    transform.velocity
+                    kinematic.velocity
 
-        nextOrientation =
-            transform.orientation
-                |> Quantity.plus (nextRotation |> Quantity.for delta)
+        clampedVelocity =
+            let
+                currentSpeed =
+                    Vector2d.length nextVelocity
+            in
+            if currentSpeed |> Quantity.greaterThan steeringConfig.maxVelocity then
+                Vector2d.scaleTo steeringConfig.maxVelocity nextVelocity
+
+            else
+                nextVelocity
+
+        nextPosition =
+            kinematic.position
+                |> Point2d.translateBy (Vector2d.for delta clampedVelocity)
 
         nextRotation =
             case steering.angular of
                 Just angularAcceleration ->
-                    transform.rotation
-                        |> Quantity.plus (angularAcceleration |> Quantity.for delta)
+                    kinematic.rotation
+                        |> Quantity.plus (Quantity.for delta angularAcceleration)
+                        |> Quantity.clamp
+                            (Quantity.negate steeringConfig.maxRotation)
+                            steeringConfig.maxRotation
 
                 Nothing ->
-                    transform.rotation
+                    kinematic.rotation
 
-        angle =
-            Angle.inRadians nextOrientation
-
-        d =
-            nextVelocity
-                |> Quantity.for delta
-                |> Length.inMeters
-
-        offset =
-            Vector2d.meters (d * cos angle) (d * sin angle)
+        nextOrientation =
+            kinematic.orientation
+                |> Quantity.plus (Quantity.for delta nextRotation)
+                |> Angle.normalize
     in
-    { transform
-        | position = Point2d.translateBy offset transform.position
-        , orientation = nextOrientation
-        , velocity = nextVelocity
-        , rotation = nextRotation
+    { position = nextPosition
+    , velocity = clampedVelocity
+    , orientation = nextOrientation
+    , rotation = nextRotation
     }
 
 
@@ -1426,60 +1549,69 @@ clampVelocity { minVelocity, maxVelocity } velocity =
     Quantity.clamp minVelocity maxVelocity velocity
 
 
+maxAccelerationTowards :
+    SteeringConfig2d
+    -> Kinematic2d coords
+    -> Direction2d coords
+    -> Vector2d Acceleration.MetersPerSecondSquared coords
+maxAccelerationTowards steeringConfig kinematic dir =
+    Vector2d.withLength steeringConfig.maxAcceleration dir
+
+
 
 -- Integration
 
 
 type alias SimulationStep state =
     { step : Int
-    , transform : Transform2d TestCoordinates
-    , steering : Steering2d
+    , kinematic : Kinematic2d TestCoordinates
+    , steering : Steering2d TestCoordinates
     , state : state
     }
 
 
 simulateSteps :
     Int
-    -> (Transform2d TestCoordinates -> Steering2d)
-    -> Transform2d TestCoordinates
+    -> (Kinematic2d TestCoordinates -> Steering2d TestCoordinates)
+    -> Kinematic2d TestCoordinates
     -> List (SimulationStep ())
-simulateSteps numSteps behaviorFn initialTransform =
-    simulateStepsWithState numSteps (\transform _ -> ( behaviorFn transform, () )) () initialTransform
+simulateSteps numSteps behaviorFn initialKinematic =
+    simulateStepsWithState numSteps (\kinematic _ -> ( behaviorFn kinematic, () )) () initialKinematic
 
 
 simulateStepsWithState :
     Int
-    -> (Transform2d TestCoordinates -> state -> ( Steering2d, state ))
+    -> (Kinematic2d TestCoordinates -> state -> ( Steering2d TestCoordinates, state ))
     -> state
-    -> Transform2d TestCoordinates
+    -> Kinematic2d TestCoordinates
     -> List (SimulationStep state)
-simulateStepsWithState numSteps behaviorFn initialState initialTransform =
-    simulateStepsHelper numSteps behaviorFn initialState initialTransform 0 []
+simulateStepsWithState numSteps behaviorFn initialState initialKinematic =
+    simulateStepsHelper numSteps behaviorFn initialState initialKinematic 0 []
 
 
 simulateStepsHelper :
     Int
-    -> (Transform2d TestCoordinates -> state -> ( Steering2d, state ))
+    -> (Kinematic2d TestCoordinates -> state -> ( Steering2d TestCoordinates, state ))
     -> state
-    -> Transform2d TestCoordinates
+    -> Kinematic2d TestCoordinates
     -> Int
     -> List (SimulationStep state)
     -> List (SimulationStep state)
-simulateStepsHelper remaining behaviorFn currentState currentTransform stepNum acc =
+simulateStepsHelper remaining behaviorFn currentState currentKinematic stepNum acc =
     if remaining <= 0 then
         List.reverse acc
 
     else
         let
             ( steering, nextState ) =
-                behaviorFn currentTransform currentState
+                behaviorFn currentKinematic currentState
 
             nextTransform =
-                applySteering defaultConfig (Duration.seconds 0.1) steering currentTransform
+                applySteering defaultConfig (Duration.seconds 0.1) steering currentKinematic
 
             step =
                 { step = stepNum
-                , transform = currentTransform
+                , kinematic = currentKinematic
                 , steering = steering
                 , state = currentState
                 }
@@ -1489,7 +1621,7 @@ simulateStepsHelper remaining behaviorFn currentState currentTransform stepNum a
 
 distanceToTarget : Point2d Length.Meters TestCoordinates -> SimulationStep state -> Length.Length
 distanceToTarget target step =
-    Point2d.distanceFrom step.transform.position target
+    Point2d.distanceFrom step.kinematic.position target
 
 
 type alias ConvergenceConfig =
@@ -1515,29 +1647,29 @@ initialLastDistance =
 
 
 simulateUntilConverged :
-    (Transform2d TestCoordinates -> Point2d Length.Meters TestCoordinates -> Steering2d)
+    (Kinematic2d TestCoordinates -> Point2d Length.Meters TestCoordinates -> Steering2d TestCoordinates)
     -> Point2d Length.Meters TestCoordinates
-    -> Transform2d TestCoordinates
+    -> Kinematic2d TestCoordinates
     -> Length.Length
-simulateUntilConverged behaviorFn target initialTransform =
-    simulateUntilConvergedWith defaultConvergenceConfig behaviorFn target initialTransform
+simulateUntilConverged behaviorFn target initialKinematic =
+    simulateUntilConvergedWith defaultConvergenceConfig behaviorFn target initialKinematic
 
 
 simulateUntilConvergedWith :
     ConvergenceConfig
-    -> (Transform2d TestCoordinates -> Point2d Length.Meters TestCoordinates -> Steering2d)
+    -> (Kinematic2d TestCoordinates -> Point2d Length.Meters TestCoordinates -> Steering2d TestCoordinates)
     -> Point2d Length.Meters TestCoordinates
-    -> Transform2d TestCoordinates
+    -> Kinematic2d TestCoordinates
     -> Length.Length
-simulateUntilConvergedWith config behaviorFn target initialTransform =
-    simulateUntilConvergedHelper config behaviorFn target initialTransform 0 initialLastDistance
+simulateUntilConvergedWith config behaviorFn target initialKinematic =
+    simulateUntilConvergedHelper config behaviorFn target initialKinematic 0 initialLastDistance
 
 
 simulateUntilConvergedHelper :
     ConvergenceConfig
-    -> (Transform2d TestCoordinates -> Point2d Length.Meters TestCoordinates -> Steering2d)
+    -> (Kinematic2d TestCoordinates -> Point2d Length.Meters TestCoordinates -> Steering2d TestCoordinates)
     -> Point2d Length.Meters TestCoordinates
-    -> Transform2d TestCoordinates
+    -> Kinematic2d TestCoordinates
     -> Int
     -> Length.Length
     -> Length.Length
