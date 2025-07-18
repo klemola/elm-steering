@@ -12,8 +12,7 @@ import Length
 import Point2d exposing (Point2d)
 import Quantity exposing (Quantity)
 import Random
-import Set
-import Speed exposing (Speed)
+import Speed
 import Steering2d
     exposing
         ( Kinematic2d
@@ -23,6 +22,7 @@ import Steering2d
         , accelerate
         , arrive
         , decelerate
+        , flee
         , lookAt
         , lookWhereYoureGoing
         , none
@@ -133,6 +133,11 @@ angleFuzzer =
 seedFuzzer : Fuzzer Random.Seed
 seedFuzzer =
     Fuzz.map Random.initialSeed (Fuzz.intRange 0 1000000)
+
+
+closenessThreshold : Length.Length
+closenessThreshold =
+    Length.meters 0.1
 
 
 suite : Test
@@ -852,7 +857,7 @@ seekTests =
                 in
                 seek config source target
                     |> .linear
-                    |> Expect.equal (Just (maxAccelerationTowards config source dirToTarget))
+                    |> Expect.equal (Just (maxAccelerationTowards config dirToTarget))
         , test "produces no linear acceleration when at target" <|
             \_ ->
                 let
@@ -869,11 +874,6 @@ seekTests =
                     |> .linear
                     |> Expect.equal Nothing
         ]
-
-
-closenessThreshold : Length.Length
-closenessThreshold =
-    Length.meters 0.1
 
 
 seekFuzzTests : Test
@@ -940,6 +940,93 @@ seekIntegrationTests =
                             |> Maybe.withDefault initialDistance
                 in
                 finalDistance |> expectLessThan initialDistance
+        ]
+
+
+fleeTests : Test
+fleeTests =
+    describe "flee behavior - unit tests"
+        [ test "produces max acceleration away from target" <|
+            \_ ->
+                let
+                    config =
+                        defaultConfig
+
+                    source =
+                        atOrigin
+
+                    target =
+                        Point2d.meters 10 0
+
+                    dirFromTarget =
+                        Direction2d.from target source.position |> Maybe.withDefault Direction2d.positiveX
+                in
+                flee config source target
+                    |> .linear
+                    |> Expect.equal (Just (maxAccelerationTowards config dirFromTarget))
+        ]
+
+
+fleeFuzzTests : Test
+fleeFuzzTests =
+    describe "flee behavior - fuzz tests"
+        [ fuzz2 kinematicFuzzer point2dFuzzer "always respects max acceleration limits" <|
+            \source targetPos ->
+                let
+                    result =
+                        flee defaultConfig source targetPos
+                in
+                case result.linear of
+                    Just acceleration ->
+                        Vector2d.length acceleration |> expectLessThanOrEqualTo defaultConfig.maxAcceleration
+
+                    Nothing ->
+                        Expect.fail "Expected linear acceleration"
+        ]
+
+
+fleeIntegrationTests : Test
+fleeIntegrationTests =
+    describe "flee behavior - integration tests"
+        [ test "consistently moves away from target over multiple steps" <|
+            \_ ->
+                let
+                    target =
+                        Point2d.meters 10 0
+
+                    initialKinematic =
+                        atOrigin |> withPosition (Point2d.meters -5 0)
+
+                    trajectory =
+                        simulateSteps 20 (\kinematic -> flee defaultConfig kinematic target) initialKinematic
+
+                    distances =
+                        List.map (distanceToTarget target) trajectory
+                in
+                expectMonotonicallyIncreasing distances
+        , test "gets further away from target over time" <|
+            \_ ->
+                let
+                    target =
+                        Point2d.meters 5 0
+
+                    initialKinematic =
+                        atOrigin
+
+                    initialDistance =
+                        Point2d.distanceFrom initialKinematic.position target
+
+                    trajectory =
+                        simulateSteps 10 (\transform -> flee defaultConfig transform target) initialKinematic
+
+                    finalDistance =
+                        trajectory
+                            |> List.reverse
+                            |> List.head
+                            |> Maybe.map (.kinematic >> .position >> Point2d.distanceFrom target)
+                            |> Maybe.withDefault initialDistance
+                in
+                finalDistance |> expectGreaterThan initialDistance
         ]
 
 
@@ -1471,6 +1558,23 @@ expectLessThanOrEqualTo baseline value =
             )
 
 
+expectMonotonicallyIncreasing : List (Quantity number units) -> Expect.Expectation
+expectMonotonicallyIncreasing values =
+    case values of
+        [] ->
+            Expect.pass
+
+        [ _ ] ->
+            Expect.pass
+
+        first :: second :: rest ->
+            if second |> Quantity.greaterThanOrEqualTo first then
+                expectMonotonicallyIncreasing (second :: rest)
+
+            else
+                Expect.fail "Expected monotonically increasing values"
+
+
 expectMonotonicallyDecreasing : List (Quantity number units) -> Expect.Expectation
 expectMonotonicallyDecreasing values =
     case values of
@@ -1544,17 +1648,11 @@ applySteering steeringConfig delta steering kinematic =
     }
 
 
-clampVelocity : SteeringConfig2d -> Speed -> Speed
-clampVelocity { minVelocity, maxVelocity } velocity =
-    Quantity.clamp minVelocity maxVelocity velocity
-
-
 maxAccelerationTowards :
     SteeringConfig2d
-    -> Kinematic2d coords
     -> Direction2d coords
     -> Vector2d Acceleration.MetersPerSecondSquared coords
-maxAccelerationTowards steeringConfig kinematic dir =
+maxAccelerationTowards steeringConfig dir =
     Vector2d.withLength steeringConfig.maxAcceleration dir
 
 

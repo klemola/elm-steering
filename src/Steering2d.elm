@@ -6,6 +6,7 @@ module Steering2d exposing
     , accelerate
     , arrive
     , decelerate
+    , flee
     , lookAt
     , lookWhereYoureGoing
     , none
@@ -21,7 +22,6 @@ import Acceleration exposing (Acceleration)
 import Angle exposing (Angle)
 import AngularAcceleration exposing (AngularAcceleration)
 import AngularSpeed exposing (AngularSpeed)
-import Circle2d
 import Direction2d
 import Duration
 import Length exposing (Length)
@@ -174,6 +174,18 @@ seek config source target =
     case Direction2d.from source.position target of
         Just directionToTarget ->
             { linear = Just (Vector2d.withLength config.maxAcceleration directionToTarget)
+            , angular = Nothing
+            }
+
+        Nothing ->
+            none
+
+
+flee : SteeringConfig2d -> Kinematic2d coords -> Point2d Length.Meters coords -> Steering2d coords
+flee config source target =
+    case Direction2d.from target source.position of
+        Just directionFromTarget ->
+            { linear = Just (Vector2d.withLength config.maxAcceleration directionFromTarget)
             , angular = Nothing
             }
 
