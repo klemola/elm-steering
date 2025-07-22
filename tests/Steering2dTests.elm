@@ -9,13 +9,15 @@ import Duration exposing (Duration)
 import Expect
 import Fuzz exposing (Fuzzer)
 import Length
+import LineSegment2d
 import Point2d exposing (Point2d)
 import Quantity exposing (Quantity)
 import Random
 import Speed
 import Steering2d
     exposing
-        ( Kinematic2d
+        ( Collision2d
+        , Kinematic2d
         , Steering2d
         , SteeringConfig2d
         , WanderConfig2d
@@ -30,6 +32,7 @@ import Steering2d
         , rotateCounterclockwise
         , seek
         , stopRotating
+        , wallAvoidance
         , wander
         )
 import Test
@@ -158,6 +161,9 @@ suite =
         , wanderTests
         , wanderFuzzTests
         , wanderIntegrationTests
+        , wallAvoidanceTests
+        , wallAvoidanceFuzzTests
+        , wallAvoidanceIntegrationTests
         ]
 
 
@@ -327,7 +333,6 @@ rotateTests =
                 ]
                     |> List.map .linear
                     |> List.filterMap identity
-                    -- Expected result: bunch of Nothings are cleaned to produce an empty list
                     |> Expect.equalLists []
         , test "rotate increases clockwise rotation over time" <|
             \_ ->
@@ -776,7 +781,6 @@ lookAtIntegrationTests =
                                             |> Angle.normalize
                                         )
                                 )
-                            -- Stop measuring before expected oscillation around the target orientation begins
                             |> List.filter (Quantity.greaterThan (Angle.radians 0.1))
                 in
                 expectMonotonicallyDecreasing angleDifferences
@@ -1188,7 +1192,6 @@ arriveIntegrationTests =
                         measurements
                             |> List.drop (slowdownStartIndex + 1)
                             |> List.map (.velocity >> Vector2d.length)
-                            -- Stop measuring before expected oscillation around the target velocity begins
                             |> List.filter (Quantity.greaterThan (Speed.metersPerSecond 0.5))
                 in
                 if List.length decelerationPhaseSlice >= 5 then
@@ -1402,7 +1405,6 @@ wanderIntegrationTests =
                     positions =
                         trajectory |> List.map (.kinematic >> .position)
 
-                    -- Check that the path isn't a straight line by measuring variance in direction
                     directions =
                         positions
                             |> List.map2 Vector2d.from (List.drop 1 positions)
@@ -1494,6 +1496,288 @@ wanderIntegrationTests =
                         Point2d.distanceFrom initialPosition finalPosition
                 in
                 totalDistance |> expectGreaterThan (Length.meters 1.0)
+        ]
+
+
+wallAvoidanceTests : Test
+wallAvoidanceTests =
+    describe "wallAvoidance behavior - unit tests"
+        [ test "produces no steering when no collision detected" <|
+            \_ ->
+                let
+                    config =
+                        defaultConfig
+
+                    source =
+                        atOrigin
+
+                    noCollisionDetector _ _ _ =
+                        Nothing
+                in
+                wallAvoidance config noCollisionDetector (Length.meters 5) source
+                    |> Expect.equal none
+        , test "produces linear steering when collision detected" <|
+            \_ ->
+                let
+                    config =
+                        defaultConfig
+
+                    source =
+                        atOrigin |> withVelocity (Vector2d.metersPerSecond 3 0)
+
+                    collisionDetector _ _ _ =
+                        Just ( Point2d.meters 2 0, Direction2d.negativeX )
+                in
+                wallAvoidance config collisionDetector (Length.meters 5) source
+                    |> .linear
+                    |> Expect.notEqual Nothing
+        , test "produces no angular steering" <|
+            \_ ->
+                let
+                    config =
+                        defaultConfig
+
+                    source =
+                        atOrigin |> withVelocity (Vector2d.metersPerSecond 3 0)
+
+                    collisionDetector _ _ _ =
+                        Just ( Point2d.meters 2 0, Direction2d.negativeX )
+                in
+                wallAvoidance config collisionDetector (Length.meters 5) source
+                    |> .angular
+                    |> Expect.equal Nothing
+        , test "steers perpendicular to wall normal + breaking velocity offset" <|
+            \_ ->
+                let
+                    config =
+                        defaultConfig
+
+                    source =
+                        atOrigin |> withVelocity (Vector2d.metersPerSecond 3 0)
+
+                    wallNormal =
+                        Direction2d.positiveY
+
+                    collisionDetector _ _ _ =
+                        Just ( Point2d.meters 2 0, wallNormal )
+                in
+                case wallAvoidance config collisionDetector (Length.meters 5) source |> .linear of
+                    Just steeringForce ->
+                        let
+                            expectedDirection =
+                                -- The non-standard breaking component of the behavior distorts the expected angle
+                                Direction2d.perpendicularTo wallNormal |> Direction2d.rotateBy (Angle.degrees -45)
+
+                            actualDirection =
+                                Vector2d.direction steeringForce
+                        in
+                        case ( expectedDirection, actualDirection ) of
+                            ( expected, Just actual ) ->
+                                let
+                                    angleDiff =
+                                        Direction2d.angleFrom expected actual |> Quantity.abs
+                                in
+                                angleDiff |> expectLessThan (Angle.degrees 5)
+
+                            _ ->
+                                Expect.fail "Expected valid directions"
+
+                    _ ->
+                        Expect.fail "Expected linear steering"
+        , test "stronger avoidance when closer to wall" <|
+            \_ ->
+                let
+                    config =
+                        defaultConfig
+
+                    source =
+                        atOrigin |> withVelocity (Vector2d.metersPerSecond 3 0)
+
+                    probeDistance =
+                        Length.meters 5
+
+                    closeCollisionDetector _ _ _ =
+                        Just ( Point2d.meters 1 0, Direction2d.negativeX )
+
+                    farCollisionDetector _ _ _ =
+                        Just ( Point2d.meters 4 0, Direction2d.negativeX )
+
+                    closeForce =
+                        wallAvoidance config closeCollisionDetector probeDistance source
+                            |> .linear
+                            |> Maybe.map Vector2d.length
+                            |> Maybe.withDefault Quantity.zero
+
+                    farForce =
+                        wallAvoidance config farCollisionDetector probeDistance source
+                            |> .linear
+                            |> Maybe.map Vector2d.length
+                            |> Maybe.withDefault Quantity.zero
+                in
+                closeForce |> expectGreaterThan farForce
+        ]
+
+
+wallAvoidanceFuzzTests : Test
+wallAvoidanceFuzzTests =
+    describe "wallAvoidance behavior - fuzz tests"
+        [ fuzz2 kinematicFuzzer (Fuzz.floatRange 1 10) "always respects max acceleration limits" <|
+            \source probeDistanceFloat ->
+                let
+                    probeDistance =
+                        Length.meters probeDistanceFloat
+
+                    collisionDetector _ _ _ =
+                        Just ( Point2d.meters 2 0, Direction2d.positiveY )
+
+                    result =
+                        wallAvoidance defaultConfig collisionDetector probeDistance source
+                in
+                case result.linear of
+                    Just acceleration ->
+                        Vector2d.length acceleration |> expectLessThanOrEqualTo defaultConfig.maxAcceleration
+
+                    Nothing ->
+                        Expect.pass
+        , fuzz kinematicFuzzer "never produces angular steering" <|
+            \source ->
+                let
+                    collisionDetector _ _ _ =
+                        Just ( Point2d.meters 5 5, Direction2d.negativeX )
+                in
+                wallAvoidance defaultConfig collisionDetector (Length.meters 5) source
+                    |> .angular
+                    |> Expect.equal Nothing
+        ]
+
+
+wallAvoidanceIntegrationTests : Test
+wallAvoidanceIntegrationTests =
+    describe "wallAvoidance behavior - integration tests"
+        [ test "successfully avoids head-on collision with wall" <|
+            \_ ->
+                let
+                    initialKinematic =
+                        atOrigin
+                            |> withPosition (Point2d.meters -5 0)
+                            |> withVelocity (Vector2d.metersPerSecond 2 0)
+
+                    wallCollisionDetector startPoint direction probeDistance =
+                        let
+                            endPoint =
+                                startPoint |> Point2d.translateIn direction probeDistance
+
+                            ray =
+                                LineSegment2d.from startPoint endPoint
+
+                            wallSegment =
+                                LineSegment2d.from (Point2d.meters 0 -10) (Point2d.meters 0 10)
+                        in
+                        LineSegment2d.intersectionPoint wallSegment ray
+                            |> Maybe.map (\point -> ( point, Direction2d.negativeX ))
+
+                    trajectory =
+                        simulateSteps 30
+                            (\kinematic -> wallAvoidance defaultConfig wallCollisionDetector (Length.meters 3) kinematic)
+                            initialKinematic
+
+                    finalPosition =
+                        trajectory
+                            |> List.reverse
+                            |> List.head
+                            |> Maybe.map (.kinematic >> .position)
+                            |> Maybe.withDefault initialKinematic.position
+
+                    finalX =
+                        Point2d.xCoordinate finalPosition
+                in
+                finalX |> expectLessThan Quantity.zero
+        , test "maintains forward progress while avoiding wall" <|
+            \_ ->
+                let
+                    initialKinematic =
+                        atOrigin
+                            |> withPosition (Point2d.meters -8 -2)
+                            |> withVelocity (Vector2d.metersPerSecond 3 1)
+
+                    wallCollisionDetector startPoint direction probeDistance =
+                        let
+                            endPoint =
+                                startPoint |> Point2d.translateIn direction probeDistance
+
+                            ray =
+                                LineSegment2d.from startPoint endPoint
+
+                            wallSegment =
+                                LineSegment2d.from (Point2d.meters -20 0) (Point2d.meters 20 0)
+                        in
+                        LineSegment2d.intersectionPoint wallSegment ray
+                            |> Maybe.map (\point -> ( point, Direction2d.negativeY ))
+
+                    trajectory =
+                        simulateSteps 25
+                            (\kinematic -> wallAvoidance defaultConfig wallCollisionDetector (Length.meters 4) kinematic)
+                            initialKinematic
+
+                    positions =
+                        trajectory |> List.map (.kinematic >> .position)
+
+                    initialX =
+                        Point2d.xCoordinate initialKinematic.position
+
+                    finalX =
+                        positions
+                            |> List.reverse
+                            |> List.head
+                            |> Maybe.map Point2d.xCoordinate
+                            |> Maybe.withDefault initialX
+                in
+                finalX |> expectGreaterThan initialX
+        , test "does not oscillate when running parallel to wall" <|
+            \_ ->
+                let
+                    initialKinematic =
+                        atOrigin
+                            |> withPosition (Point2d.meters -2 -1)
+                            |> withVelocity (Vector2d.metersPerSecond 0 3)
+
+                    wallCollisionDetector startPoint direction probeDistance =
+                        let
+                            endPoint =
+                                startPoint |> Point2d.translateIn direction probeDistance
+
+                            ray =
+                                LineSegment2d.from startPoint endPoint
+
+                            wallSegment =
+                                LineSegment2d.from (Point2d.meters 0 -10) (Point2d.meters 0 10)
+                        in
+                        LineSegment2d.intersectionPoint wallSegment ray
+                            |> Maybe.map (\point -> ( point, Direction2d.negativeX ))
+
+                    trajectory =
+                        simulateSteps 20
+                            (\kinematic -> wallAvoidance defaultConfig wallCollisionDetector (Length.meters 3) kinematic)
+                            initialKinematic
+
+                    xPositions =
+                        trajectory
+                            |> List.map (.kinematic >> .position >> Point2d.xCoordinate >> Length.inMeters)
+
+                    avgX =
+                        List.sum xPositions / toFloat (List.length xPositions)
+
+                    variance =
+                        if List.length xPositions > 0 then
+                            xPositions
+                                |> List.map (\x -> (x - avgX) ^ 2)
+                                |> List.sum
+                                |> (\sum -> sum / toFloat (List.length xPositions))
+
+                        else
+                            0
+                in
+                variance |> Expect.lessThan 0.1
         ]
 
 

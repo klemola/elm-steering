@@ -1,10 +1,13 @@
 module Steering2d exposing
-    ( Kinematic2d
+    ( Collision2d
+    , Kinematic2d
     , Steering2d
     , SteeringConfig2d
     , WanderConfig2d
     , accelerate
     , arrive
+    , combine
+    , combineWeighted
     , decelerate
     , flee
     , lookAt
@@ -15,6 +18,7 @@ module Steering2d exposing
     , seek
     , stopAtDistance
     , stopRotating
+    , wallAvoidance
     , wander
     )
 
@@ -22,7 +26,7 @@ import Acceleration exposing (Acceleration)
 import Angle exposing (Angle)
 import AngularAcceleration exposing (AngularAcceleration)
 import AngularSpeed exposing (AngularSpeed)
-import Direction2d
+import Direction2d exposing (Direction2d)
 import Duration
 import Length exposing (Length)
 import Point2d exposing (Point2d)
@@ -304,6 +308,120 @@ wander steeringConfig { distance, radius, rate } seed wanderOrientation source =
     , nextWanderOrientation
     , nextSeed
     )
+
+
+type alias Collision2d coords =
+    ( Point2d Length.Meters coords, Direction2d coords )
+
+
+wallAvoidance :
+    SteeringConfig2d
+    -> (Point2d Length.Meters coords -> Direction2d coords -> Length -> Maybe (Collision2d coords))
+    -> Length
+    -> Kinematic2d coords
+    -> Steering2d coords
+wallAvoidance config detectCollisionFn probeDistance kinematic =
+    let
+        lookAheadDirection =
+            Vector2d.direction kinematic.velocity
+                |> Maybe.withDefault (Direction2d.fromAngle kinematic.orientation)
+    in
+    case detectCollisionFn kinematic.position lookAheadDirection probeDistance of
+        Nothing ->
+            none
+
+        Just ( collisionPoint, wallNormal ) ->
+            let
+                distanceToWall =
+                    Point2d.distanceFrom kinematic.position collisionPoint
+
+                avoidanceStrength =
+                    config.maxAcceleration
+                        |> Quantity.multiplyBy (1.0 - Quantity.ratio distanceToWall probeDistance)
+
+                slideDirection =
+                    Direction2d.perpendicularTo wallNormal
+
+                slideAndBrake =
+                    Vector2d.withLength avoidanceStrength slideDirection
+                        |> Vector2d.plus (Vector2d.withLength avoidanceStrength wallNormal)
+
+                clampedForce =
+                    if Vector2d.length slideAndBrake |> Quantity.greaterThan config.maxAcceleration then
+                        Vector2d.scaleTo config.maxAcceleration slideAndBrake
+
+                    else
+                        slideAndBrake
+            in
+            { linear = Just clampedForce
+            , angular = Nothing
+            }
+
+
+
+-- Utilties
+
+
+combine : List (Steering2d coords) -> Steering2d coords
+combine steerings =
+    steerings
+        |> List.map (Tuple.pair 1)
+        |> combineWeighted
+
+
+combineWeighted : List ( Float, Steering2d coords ) -> Steering2d coords
+combineWeighted weightedSteerings =
+    let
+        -- Disregard values and weights from steering behaviors that are not contributing to the combined behavior
+        activeSteerings =
+            List.filter
+                (\( _, s ) -> s.linear /= Nothing || s.angular /= Nothing)
+                weightedSteerings
+
+        totalWeight =
+            activeSteerings
+                |> List.map (Tuple.first >> abs)
+                |> List.sum
+
+        normalizedWeights =
+            List.map
+                (\( weight, steering ) -> ( abs weight / totalWeight, steering ))
+                activeSteerings
+
+        ( totalLinear, totalAngular ) =
+            List.foldl
+                (\( normalizedWeight, steering ) ( accLinear, accAngular ) ->
+                    let
+                        weightedLinear =
+                            steering.linear
+                                |> Maybe.map (Vector2d.scaleBy normalizedWeight)
+                                |> Maybe.withDefault Vector2d.zero
+
+                        weightedAngular =
+                            steering.angular
+                                |> Maybe.map (Quantity.multiplyBy normalizedWeight)
+                                |> Maybe.withDefault Quantity.zero
+                    in
+                    ( Vector2d.plus accLinear weightedLinear
+                    , Quantity.plus accAngular weightedAngular
+                    )
+                )
+                ( Vector2d.zero, Quantity.zero )
+                normalizedWeights
+    in
+    { linear =
+        if Vector2d.length totalLinear |> Quantity.greaterThan Quantity.zero then
+            Just totalLinear
+
+        else
+            Nothing
+    , angular =
+        if Quantity.abs totalAngular |> Quantity.greaterThan Quantity.zero then
+            Just totalAngular
+
+        else
+            Nothing
+    }
 
 
 
