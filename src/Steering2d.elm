@@ -386,62 +386,38 @@ wallAvoidance config detectCollisionFn probeDistance kinematic =
 -- Utilties
 
 
-combine : List (Steering2d coords) -> Steering2d coords
-combine steerings =
+combine : SteeringConfig2d -> List (Steering2d coords) -> Steering2d coords
+combine config steerings =
     steerings
         |> List.map (Tuple.pair 1)
-        |> combineWeighted
+        |> combineWeighted config
 
 
-combineWeighted : List ( Float, Steering2d coords ) -> Steering2d coords
-combineWeighted weightedSteerings =
+combineWeighted : SteeringConfig2d -> List ( Float, Steering2d coords ) -> Steering2d coords
+combineWeighted config weightedSteerings =
     let
-        -- Disregard values and weights from steering behaviors that are not contributing to the combined behavior
         activeSteerings =
-            List.filter
-                (\( _, s ) -> s.linear /= Nothing || s.angular /= Nothing)
-                weightedSteerings
+            List.filter (\( _, s ) -> s.linear /= Nothing || s.angular /= Nothing) weightedSteerings
 
-        totalWeight =
-            activeSteerings
-                |> List.map (Tuple.first >> abs)
-                |> List.sum
-
-        normalizedWeights =
-            List.map
-                (\( weight, steering ) -> ( abs weight / totalWeight, steering ))
-                activeSteerings
-
-        ( totalLinear, totalAngular ) =
+        ( accLinear, accAngular ) =
             List.foldl
-                (\( normalizedWeight, steering ) ( accLinear, accAngular ) ->
-                    let
-                        weightedLinear =
-                            steering.linear
-                                |> Maybe.map (Vector2d.scaleBy normalizedWeight)
-                                |> Maybe.withDefault Vector2d.zero
-
-                        weightedAngular =
-                            steering.angular
-                                |> Maybe.map (Quantity.multiplyBy normalizedWeight)
-                                |> Maybe.withDefault Quantity.zero
-                    in
-                    ( Vector2d.plus accLinear weightedLinear
-                    , Quantity.plus accAngular weightedAngular
+                (\( weight, steering ) ( linearAcc, angularAcc ) ->
+                    ( accumulateLinear config (abs weight) steering linearAcc
+                    , accumulateAngular config (abs weight) steering angularAcc
                     )
                 )
                 ( Vector2d.zero, Quantity.zero )
-                normalizedWeights
+                activeSteerings
     in
     { linear =
-        if Vector2d.length totalLinear |> Quantity.greaterThan Quantity.zero then
-            Just totalLinear
+        if Vector2d.length accLinear |> Quantity.greaterThan Quantity.zero then
+            Just accLinear
 
         else
             Nothing
     , angular =
-        if Quantity.abs totalAngular |> Quantity.greaterThan Quantity.zero then
-            Just totalAngular
+        if Quantity.abs accAngular |> Quantity.greaterThan Quantity.zero then
+            Just accAngular
 
         else
             Nothing
@@ -452,6 +428,89 @@ combineWeighted weightedSteerings =
 --
 -- Internals
 --
+
+
+accumulateLinear :
+    SteeringConfig2d
+    -> Float
+    -> Steering2d coords
+    -> Vector2d Acceleration.MetersPerSecondSquared coords
+    -> Vector2d Acceleration.MetersPerSecondSquared coords
+accumulateLinear config weight steering acc =
+    case steering.linear of
+        Nothing ->
+            acc
+
+        Just linear ->
+            let
+                contribution =
+                    Vector2d.scaleBy weight linear
+
+                currentMagnitude =
+                    Vector2d.length acc
+
+                remainingBudget =
+                    config.maxAcceleration |> Quantity.minus currentMagnitude
+            in
+            if remainingBudget |> Quantity.lessThanOrEqualToZero then
+                acc
+
+            else
+                let
+                    contributionMagnitude =
+                        Vector2d.length contribution
+                in
+                if contributionMagnitude |> Quantity.lessThanOrEqualTo remainingBudget then
+                    acc |> Vector2d.plus contribution
+
+                else
+                    acc |> Vector2d.plus (Vector2d.scaleTo remainingBudget contribution)
+
+
+accumulateAngular :
+    SteeringConfig2d
+    -> Float
+    -> Steering2d coords
+    -> AngularAcceleration
+    -> AngularAcceleration
+accumulateAngular config weight steering acc =
+    case steering.angular of
+        Nothing ->
+            acc
+
+        Just angular ->
+            let
+                contribution =
+                    angular |> Quantity.multiplyBy weight
+
+                currentMagnitude =
+                    Quantity.abs acc
+
+                remainingBudget =
+                    config.maxAngularAcceleration |> Quantity.minus currentMagnitude
+            in
+            if remainingBudget |> Quantity.lessThanOrEqualToZero then
+                acc
+
+            else
+                let
+                    contributionMagnitude =
+                        Quantity.abs contribution
+                in
+                if contributionMagnitude |> Quantity.lessThanOrEqualTo remainingBudget then
+                    acc |> Quantity.plus contribution
+
+                else
+                    -- Scale to fill remaining budget, preserving direction
+                    let
+                        sign =
+                            if contribution |> Quantity.greaterThanZero then
+                                1
+
+                            else
+                                -1
+                    in
+                    acc |> Quantity.plus (remainingBudget |> Quantity.multiplyBy sign)
 
 
 generateAngleDelta : Float -> Float -> Random.Generator Angle

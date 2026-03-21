@@ -22,6 +22,8 @@ import Steering2d
         , WanderConfig2d
         , accelerate
         , arrive
+        , combine
+        , combineWeighted
         , decelerate
         , flee
         , lookAt
@@ -166,6 +168,7 @@ suite =
         , wallAvoidanceTests
         , wallAvoidanceFuzzTests
         , wallAvoidanceIntegrationTests
+        , combineTests
         ]
 
 
@@ -1785,6 +1788,157 @@ wallAvoidanceIntegrationTests =
                             0
                 in
                 variance |> Expect.lessThan 0.1
+        ]
+
+
+combineTests : Test
+combineTests =
+    describe "combine and combineWeighted"
+        [ test "weighted sum respects relative weights (higher weight wins direction)" <|
+            \_ ->
+                let
+                    leftSteering =
+                        { linear = Just (Vector2d.metersPerSecondSquared -3 0)
+                        , angular = Nothing
+                        }
+
+                    rightSteering =
+                        { linear = Just (Vector2d.metersPerSecondSquared 3 0)
+                        , angular = Nothing
+                        }
+
+                    result =
+                        combineWeighted defaultConfig
+                            [ ( 3, rightSteering )
+                            , ( 1, leftSteering )
+                            ]
+                in
+                case result.linear |> Maybe.map (Vector2d.xComponent >> Acceleration.inMetersPerSecondSquared) of
+                    Just x ->
+                        Expect.greaterThan 0 x
+
+                    Nothing ->
+                        Expect.fail "Expected linear acceleration"
+        , test "first behavior fills budget, later behaviors get remainder" <|
+            \_ ->
+                let
+                    -- Weight 1 * 5 m/s² magnitude = 5 m/s², which equals maxAcceleration
+                    firstSteering =
+                        { linear = Just (Vector2d.metersPerSecondSquared 5 0)
+                        , angular = Nothing
+                        }
+
+                    secondSteering =
+                        { linear = Just (Vector2d.metersPerSecondSquared 0 5)
+                        , angular = Nothing
+                        }
+
+                    result =
+                        combineWeighted defaultConfig
+                            [ ( 1, firstSteering )
+                            , ( 1, secondSteering )
+                            ]
+                in
+                case result.linear of
+                    Just acceleration ->
+                        -- First behavior fills the entire budget (5 m/s²), second gets nothing
+                        Expect.all
+                            [ \_ ->
+                                Vector2d.xComponent acceleration
+                                    |> Acceleration.inMetersPerSecondSquared
+                                    |> Expect.within (Expect.Absolute 0.01) 5
+                            , \_ ->
+                                Vector2d.yComponent acceleration
+                                    |> Acceleration.inMetersPerSecondSquared
+                                    |> Expect.within (Expect.Absolute 0.01) 0
+                            ]
+                            ()
+
+                    Nothing ->
+                        Expect.fail "Expected linear acceleration"
+        , test "angular-only behaviors do not dilute linear weights" <|
+            \_ ->
+                let
+                    linearSteering =
+                        { linear = Just (Vector2d.metersPerSecondSquared 5 0)
+                        , angular = Nothing
+                        }
+
+                    angularOnlySteering =
+                        { linear = Nothing
+                        , angular = Just (AngularAcceleration.radiansPerSecondSquared 10)
+                        }
+
+                    withAngular =
+                        combineWeighted defaultConfig
+                            [ ( 1, linearSteering )
+                            , ( 100, angularOnlySteering )
+                            ]
+
+                    withoutAngular =
+                        combineWeighted defaultConfig
+                            [ ( 1, linearSteering )
+                            ]
+                in
+                -- Linear result should be the same regardless of angular-only behaviors
+                Expect.equal withAngular.linear withoutAngular.linear
+        , test "inactive behaviors with high weight have no effect" <|
+            \_ ->
+                let
+                    activeSteering =
+                        { linear = Just (Vector2d.metersPerSecondSquared 2 0)
+                        , angular = Nothing
+                        }
+
+                    result =
+                        combineWeighted defaultConfig
+                            [ ( 100, none )
+                            , ( 1, activeSteering )
+                            ]
+                in
+                case result.linear |> Maybe.map (Vector2d.xComponent >> Acceleration.inMetersPerSecondSquared) of
+                    Just x ->
+                        Expect.within (Expect.Absolute 0.01) 2 x
+
+                    Nothing ->
+                        Expect.fail "Expected linear acceleration"
+        , test "empty list produces none" <|
+            \_ ->
+                combineWeighted defaultConfig []
+                    |> Expect.equal none
+        , test "combine with config passes through to combineWeighted" <|
+            \_ ->
+                let
+                    steering1 =
+                        { linear = Just (Vector2d.metersPerSecondSquared 3 0)
+                        , angular = Nothing
+                        }
+
+                    steering2 =
+                        { linear = Just (Vector2d.metersPerSecondSquared 0 3)
+                        , angular = Nothing
+                        }
+
+                    result =
+                        combine defaultConfig [ steering1, steering2 ]
+                in
+                case result.linear of
+                    Just acceleration ->
+                        -- Both contribute equally, so result should have both X and Y components
+                        Expect.all
+                            [ \_ ->
+                                Vector2d.xComponent acceleration
+                                    |> Acceleration.inMetersPerSecondSquared
+                                    |> Expect.greaterThan 0
+                            , \_ ->
+                                Vector2d.yComponent acceleration
+                                    |> Acceleration.inMetersPerSecondSquared
+                                    |> Expect.greaterThan 0
+                            ]
+                            ()
+
+                    Nothing ->
+                        Expect.fail "Expected linear acceleration"
         ]
 
 
