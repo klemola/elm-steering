@@ -16,8 +16,7 @@ import Random
 import Speed
 import Steering2d
     exposing
-        ( Collision2d
-        , Kinematic2d
+        ( Kinematic2d
         , Steering2d
         , SteeringConfig2d
         , WanderConfig2d
@@ -155,6 +154,9 @@ suite =
         , seekTests
         , seekFuzzTests
         , seekIntegrationTests
+        , fleeTests
+        , fleeFuzzTests
+        , fleeIntegrationTests
         , arriveTests
         , arriveFuzzTests
         , arriveIntegrationTests
@@ -1546,7 +1548,7 @@ wallAvoidanceTests =
                 wallAvoidance config collisionDetector (Length.meters 5) source
                     |> .angular
                     |> Expect.equal Nothing
-        , test "steers perpendicular to wall normal + breaking velocity offset" <|
+        , test "steers along wall normal direction (penetration-depth model)" <|
             \_ ->
                 let
                     config =
@@ -1564,27 +1566,23 @@ wallAvoidanceTests =
                 case wallAvoidance config collisionDetector (Length.meters 5) source |> .linear of
                     Just steeringForce ->
                         let
-                            expectedDirection =
-                                -- The non-standard breaking component of the behavior distorts the expected angle
-                                Direction2d.perpendicularTo wallNormal |> Direction2d.rotateBy (Angle.degrees -45)
-
                             actualDirection =
                                 Vector2d.direction steeringForce
                         in
-                        case ( expectedDirection, actualDirection ) of
-                            ( expected, Just actual ) ->
+                        case actualDirection of
+                            Just actual ->
                                 let
                                     angleDiff =
-                                        Direction2d.angleFrom expected actual |> Quantity.abs
+                                        Direction2d.angleFrom wallNormal actual |> Quantity.abs
                                 in
                                 angleDiff |> expectLessThan (Angle.degrees 5)
 
                             _ ->
-                                Expect.fail "Expected valid directions"
+                                Expect.fail "Expected valid direction"
 
                     _ ->
                         Expect.fail "Expected linear steering"
-        , test "stronger avoidance when closer to wall" <|
+        , test "stronger avoidance when closer to wall (more overshoot)" <|
             \_ ->
                 let
                     config =
@@ -1594,13 +1592,22 @@ wallAvoidanceTests =
                         atOrigin |> withVelocity (Vector2d.metersPerSecond 3 0)
 
                     probeDistance =
-                        Length.meters 5
+                        Length.meters 10
 
-                    closeCollisionDetector _ _ _ =
-                        Just ( Point2d.meters 1 0, Direction2d.negativeX )
+                    -- Only center feeler detects collision to isolate the effect
+                    closeCollisionDetector startPoint direction _ =
+                        if Direction2d.componentIn (Direction2d.fromAngle (Angle.degrees 0)) direction > 0.9 then
+                            Just ( startPoint |> Point2d.translateIn direction (Length.meters 2), Direction2d.negativeX )
 
-                    farCollisionDetector _ _ _ =
-                        Just ( Point2d.meters 4 0, Direction2d.negativeX )
+                        else
+                            Nothing
+
+                    farCollisionDetector startPoint direction _ =
+                        if Direction2d.componentIn (Direction2d.fromAngle (Angle.degrees 0)) direction > 0.9 then
+                            Just ( startPoint |> Point2d.translateIn direction (Length.meters 8), Direction2d.negativeX )
+
+                        else
+                            Nothing
 
                     closeForce =
                         wallAvoidance config closeCollisionDetector probeDistance source

@@ -325,37 +325,61 @@ wallAvoidance config detectCollisionFn probeDistance kinematic =
         lookAheadDirection =
             Vector2d.direction kinematic.velocity
                 |> Maybe.withDefault (Direction2d.fromAngle kinematic.orientation)
+
+        whiskerAngle =
+            Angle.degrees 45
+
+        leftWhisker =
+            Direction2d.rotateBy whiskerAngle lookAheadDirection
+
+        rightWhisker =
+            Direction2d.rotateBy (Quantity.negate whiskerAngle) lookAheadDirection
+
+        sideProbeDistance =
+            probeDistance |> Quantity.multiplyBy 0.5
+
+        feelerForce : Direction2d coords -> Length -> Vector2d Acceleration.MetersPerSecondSquared coords
+        feelerForce direction feelerLength =
+            case detectCollisionFn kinematic.position direction feelerLength of
+                Just ( collisionPoint, wallNormal ) ->
+                    let
+                        feelerTip =
+                            kinematic.position |> Point2d.translateIn direction feelerLength
+
+                        overshoot =
+                            Point2d.distanceFrom collisionPoint feelerTip
+                    in
+                    Vector2d.withLength
+                        (overshoot
+                            |> Quantity.per (Duration.seconds 1)
+                            |> Quantity.per (Duration.seconds 1)
+                        )
+                        wallNormal
+
+                Nothing ->
+                    Vector2d.zero
+
+        totalForce =
+            Vector2d.zero
+                |> Vector2d.plus (feelerForce lookAheadDirection probeDistance)
+                |> Vector2d.plus (feelerForce leftWhisker sideProbeDistance)
+                |> Vector2d.plus (feelerForce rightWhisker sideProbeDistance)
     in
-    case detectCollisionFn kinematic.position lookAheadDirection probeDistance of
-        Nothing ->
-            none
+    if Vector2d.length totalForce |> Quantity.greaterThan Quantity.zero then
+        let
+            clampedForce =
+                if Vector2d.length totalForce |> Quantity.greaterThan config.maxAcceleration then
+                    Vector2d.scaleTo config.maxAcceleration totalForce
 
-        Just ( collisionPoint, wallNormal ) ->
-            let
-                distanceToWall =
-                    Point2d.distanceFrom kinematic.position collisionPoint
+                else
+                    totalForce
+        in
+        { linear = Just clampedForce
+        , angular = Nothing
+        }
 
-                avoidanceStrength =
-                    config.maxAcceleration
-                        |> Quantity.multiplyBy (1.0 - Quantity.ratio distanceToWall probeDistance)
-
-                slideDirection =
-                    Direction2d.perpendicularTo wallNormal
-
-                slideAndBrake =
-                    Vector2d.withLength avoidanceStrength slideDirection
-                        |> Vector2d.plus (Vector2d.withLength avoidanceStrength wallNormal)
-
-                clampedForce =
-                    if Vector2d.length slideAndBrake |> Quantity.greaterThan config.maxAcceleration then
-                        Vector2d.scaleTo config.maxAcceleration slideAndBrake
-
-                    else
-                        slideAndBrake
-            in
-            { linear = Just clampedForce
-            , angular = Nothing
-            }
+    else
+        none
 
 
 
