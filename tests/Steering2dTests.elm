@@ -32,6 +32,7 @@ import Steering2d
         , rotate
         , rotateCounterclockwise
         , seek
+        , separation
         , stopRotating
         , wallAvoidance
         , wander
@@ -166,6 +167,9 @@ suite =
         , wanderTests
         , wanderFuzzTests
         , wanderIntegrationTests
+        , separationTests
+        , separationFuzzTests
+        , separationIntegrationTests
         , wallAvoidanceTests
         , wallAvoidanceFuzzTests
         , wallAvoidanceIntegrationTests
@@ -1506,6 +1510,241 @@ wanderIntegrationTests =
                         Point2d.distanceFrom initialPosition finalPosition
                 in
                 totalDistance |> expectGreaterThan (Length.meters 1.0)
+        ]
+
+
+separationTests : Test
+separationTests =
+    describe "separation behavior - unit tests"
+        [ test "produces no steering when no collisions detected" <|
+            \_ ->
+                let
+                    noCollisions _ =
+                        []
+                in
+                separation defaultConfig noCollisions atOrigin
+                    |> Expect.equal none
+        , test "produces linear steering away from a nearby neighbor" <|
+            \_ ->
+                let
+                    source =
+                        atOrigin
+
+                    neighborPos =
+                        Point2d.meters 2 0
+
+                    collisionFn _ =
+                        [ { position = neighborPos, threshold = Length.meters 3 } ]
+                in
+                separation defaultConfig collisionFn source
+                    |> .linear
+                    |> Expect.notEqual Nothing
+        , test "produces no angular steering" <|
+            \_ ->
+                let
+                    collisionFn _ =
+                        [ { position = Point2d.meters 2 0, threshold = Length.meters 3 } ]
+                in
+                separation defaultConfig collisionFn atOrigin
+                    |> .angular
+                    |> Expect.equal Nothing
+        , test "steers away from neighbor (direction check)" <|
+            \_ ->
+                let
+                    source =
+                        atOrigin
+
+                    neighborPos =
+                        Point2d.meters 5 0
+
+                    collisionFn _ =
+                        [ { position = neighborPos, threshold = Length.meters 6 } ]
+                in
+                case separation defaultConfig collisionFn source |> .linear of
+                    Just force ->
+                        -- Force should point in negative X (away from neighbor at positive X)
+                        Vector2d.xComponent force
+                            |> Acceleration.inMetersPerSecondSquared
+                            |> Expect.lessThan 0
+
+                    Nothing ->
+                        Expect.fail "Expected linear steering"
+        , test "stronger force when closer (inverse-linear falloff)" <|
+            \_ ->
+                let
+                    threshold =
+                        Length.meters 5
+
+                    closeCollisionFn _ =
+                        [ { position = Point2d.meters 1 0, threshold = threshold } ]
+
+                    farCollisionFn _ =
+                        [ { position = Point2d.meters 4 0, threshold = threshold } ]
+
+                    closeForce =
+                        separation defaultConfig closeCollisionFn atOrigin
+                            |> .linear
+                            |> Maybe.map Vector2d.length
+                            |> Maybe.withDefault Quantity.zero
+
+                    farForce =
+                        separation defaultConfig farCollisionFn atOrigin
+                            |> .linear
+                            |> Maybe.map Vector2d.length
+                            |> Maybe.withDefault Quantity.zero
+                in
+                closeForce |> expectGreaterThan farForce
+        , test "sums repulsion from multiple neighbors" <|
+            \_ ->
+                let
+                    -- Two neighbors on opposite sides cancel X, reinforce Y
+                    collisionFn _ =
+                        [ { position = Point2d.meters 2 -1, threshold = Length.meters 4 }
+                        , { position = Point2d.meters -2 -1, threshold = Length.meters 4 }
+                        ]
+                in
+                case separation defaultConfig collisionFn atOrigin |> .linear of
+                    Just force ->
+                        -- Y component should be positive (away from both neighbors below)
+                        Vector2d.yComponent force
+                            |> Acceleration.inMetersPerSecondSquared
+                            |> Expect.greaterThan 0
+
+                    Nothing ->
+                        Expect.fail "Expected linear steering"
+        , test "uses velocity direction as fallback when positions coincide" <|
+            \_ ->
+                let
+                    source =
+                        atOrigin |> withVelocity (Vector2d.metersPerSecond 0 3)
+
+                    collisionFn _ =
+                        [ { position = Point2d.origin, threshold = Length.meters 2 } ]
+                in
+                case separation defaultConfig collisionFn source |> .linear of
+                    Just force ->
+                        -- Should push in velocity direction (positive Y)
+                        Vector2d.yComponent force
+                            |> Acceleration.inMetersPerSecondSquared
+                            |> Expect.greaterThan 0
+
+                    Nothing ->
+                        Expect.fail "Expected linear steering"
+        ]
+
+
+separationFuzzTests : Test
+separationFuzzTests =
+    describe "separation behavior - fuzz tests"
+        [ fuzz2 kinematicFuzzer point2dFuzzer "always respects max acceleration limits" <|
+            \source neighborPos ->
+                let
+                    collisionFn _ =
+                        [ { position = neighborPos, threshold = Length.meters 5 } ]
+
+                    result =
+                        separation defaultConfig collisionFn source
+                in
+                case result.linear of
+                    Just acceleration ->
+                        Vector2d.length acceleration |> expectLessThanOrEqualTo defaultConfig.maxAcceleration
+
+                    Nothing ->
+                        Expect.pass
+        , fuzz kinematicFuzzer "never produces angular steering" <|
+            \source ->
+                let
+                    collisionFn _ =
+                        [ { position = Point2d.meters 3 3, threshold = Length.meters 5 } ]
+                in
+                separation defaultConfig collisionFn source
+                    |> .angular
+                    |> Expect.equal Nothing
+        , fuzz kinematicFuzzer "produces no steering with empty collision list" <|
+            \source ->
+                separation defaultConfig (\_ -> []) source
+                    |> Expect.equal none
+        ]
+
+
+separationIntegrationTests : Test
+separationIntegrationTests =
+    describe "separation behavior - integration tests"
+        [ test "entities move apart over multiple steps" <|
+            \_ ->
+                let
+                    neighborPos =
+                        Point2d.meters 2 0
+
+                    threshold =
+                        Length.meters 4
+
+                    initialKinematic =
+                        atOrigin
+
+                    collisionFn pos =
+                        let
+                            dist =
+                                Point2d.distanceFrom pos neighborPos
+                        in
+                        if dist |> Quantity.lessThan threshold then
+                            [ { position = neighborPos, threshold = threshold } ]
+
+                        else
+                            []
+
+                    trajectory =
+                        simulateSteps 20
+                            (\kinematic -> separation defaultConfig collisionFn kinematic)
+                            initialKinematic
+
+                    distances =
+                        List.map
+                            (\step -> Point2d.distanceFrom step.kinematic.position neighborPos)
+                            trajectory
+                in
+                expectMonotonicallyIncreasing distances
+        , test "force diminishes as entity leaves threshold" <|
+            \_ ->
+                let
+                    neighborPos =
+                        Point2d.meters 1.5 0
+
+                    threshold =
+                        Length.meters 3
+
+                    initialKinematic =
+                        atOrigin
+
+                    collisionFn pos =
+                        let
+                            dist =
+                                Point2d.distanceFrom pos neighborPos
+                        in
+                        if dist |> Quantity.lessThan threshold then
+                            [ { position = neighborPos, threshold = threshold } ]
+
+                        else
+                            []
+
+                    trajectory =
+                        simulateSteps 15
+                            (\kinematic -> separation defaultConfig collisionFn kinematic)
+                            initialKinematic
+
+                    forces =
+                        trajectory
+                            |> List.filterMap
+                                (\step ->
+                                    step.steering.linear |> Maybe.map Vector2d.length
+                                )
+                in
+                case ( List.head forces, forces |> List.reverse |> List.head ) of
+                    ( Just firstForce, Just lastForce ) ->
+                        firstForce |> expectGreaterThan lastForce
+
+                    _ ->
+                        Expect.pass
         ]
 
 

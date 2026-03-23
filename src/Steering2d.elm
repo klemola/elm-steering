@@ -16,6 +16,7 @@ module Steering2d exposing
     , rotate
     , rotateCounterclockwise
     , seek
+    , separation
     , stopAtDistance
     , stopRotating
     , wallAvoidance
@@ -391,6 +392,66 @@ wallAvoidance config detectCollisionFn probeDistance kinematic =
 
     else
         none
+
+
+
+separation :
+    SteeringConfig2d
+    -> (Point2d Length.Meters coords -> List { position : Point2d Length.Meters coords, threshold : Length })
+    -> Kinematic2d coords
+    -> Steering2d coords
+separation steeringConfig detectCollisionFn kinematic =
+    let
+        collisions =
+            detectCollisionFn kinematic.position
+
+        maxAccel =
+            Acceleration.inMetersPerSecondSquared steeringConfig.maxAcceleration
+
+        -- When positions coincide, push in velocity direction (or facing direction if stationary)
+        fallbackDir =
+            Vector2d.direction kinematic.velocity
+                |> Maybe.withDefault (Direction2d.fromAngle kinematic.orientation)
+
+        repulsionVectors =
+            List.map
+                (\collision ->
+                    let
+                        dist =
+                            Point2d.distanceFrom kinematic.position collision.position
+
+                        distMeters =
+                            Length.inMeters dist
+
+                        thresholdMeters =
+                            Length.inMeters collision.threshold
+
+                        -- Inverse-linear falloff (Reynolds-style): strong when close, weak at boundary
+                        minDist =
+                            0.01
+
+                        magnitude =
+                            maxAccel * min 1 ((thresholdMeters - distMeters) / max distMeters minDist)
+
+                        awayDir =
+                            Direction2d.from collision.position kinematic.position
+                                |> Maybe.withDefault fallbackDir
+                    in
+                    Vector2d.withLength (Acceleration.metersPerSecondSquared (max 0 magnitude)) awayDir
+                )
+                collisions
+
+        summed =
+            List.foldl Vector2d.plus Vector2d.zero repulsionVectors
+    in
+    if List.isEmpty collisions then
+        none
+
+    else if Vector2d.length summed |> Quantity.greaterThan steeringConfig.maxAcceleration then
+        { linear = Just (Vector2d.scaleTo steeringConfig.maxAcceleration summed), angular = Nothing }
+
+    else
+        { linear = Just summed, angular = Nothing }
 
 
 
