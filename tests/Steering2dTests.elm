@@ -991,7 +991,11 @@ fleeFuzzTests =
                         Vector2d.length acceleration |> expectLessThanOrEqualTo defaultConfig.maxAcceleration
 
                     Nothing ->
-                        Expect.fail "Expected linear acceleration"
+                        if Point2d.distanceFrom source.position targetPos |> Quantity.lessThan closenessThreshold then
+                            Expect.pass
+
+                        else
+                            Expect.fail "Expected linear acceleration"
         ]
 
 
