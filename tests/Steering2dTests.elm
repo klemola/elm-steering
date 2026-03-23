@@ -63,7 +63,8 @@ defaultWanderConfig : WanderConfig2d
 defaultWanderConfig =
     { distance = Length.meters 3
     , radius = Length.meters 0.5
-    , rate = 0.1
+    , rate = AngularSpeed.radiansPerSecond 1.0
+    , damping = 3.0
     }
 
 
@@ -1254,7 +1255,7 @@ wanderTests =
                     source =
                         atOrigin
                 in
-                wander config wanderConfig defaultSeed wanderAngle source
+                wander config wanderConfig (Duration.seconds 0.1) defaultSeed wanderAngle source
                     |> (\( steering, _, _ ) -> steering.linear)
                     |> Expect.notEqual Nothing
         , test "produces angular acceleration when not aligned with target" <|
@@ -1272,7 +1273,7 @@ wanderTests =
                     source =
                         atOrigin
                 in
-                wander config wanderConfig defaultSeed wanderAngle source
+                wander config wanderConfig (Duration.seconds 0.1) defaultSeed wanderAngle source
                     |> (\( steering, _, _ ) -> steering.angular)
                     |> Expect.notEqual Nothing
         , test "updates wander angle" <|
@@ -1291,7 +1292,7 @@ wanderTests =
                         atOrigin
 
                     ( _, newWanderAngle, _ ) =
-                        wander config wanderConfig defaultSeed initialWanderAngle source
+                        wander config wanderConfig (Duration.seconds 0.1) defaultSeed initialWanderAngle source
                 in
                 newWanderAngle |> Expect.notEqual initialWanderAngle
         , test "updates random seed" <|
@@ -1313,7 +1314,7 @@ wanderTests =
                         defaultSeed
 
                     ( _, _, newSeed ) =
-                        wander config wanderConfig initialSeed wanderAngle source
+                        wander config wanderConfig (Duration.seconds 0.1) initialSeed wanderAngle source
                 in
                 newSeed |> Expect.notEqual initialSeed
         ]
@@ -1326,7 +1327,7 @@ wanderFuzzTests =
             \source wanderAngle seed ->
                 let
                     ( steering, _, _ ) =
-                        wander defaultConfig defaultWanderConfig seed wanderAngle source
+                        wander defaultConfig defaultWanderConfig (Duration.seconds 0.1) seed wanderAngle source
                 in
                 case steering.linear of
                     Just acceleration ->
@@ -1338,7 +1339,7 @@ wanderFuzzTests =
             \source wanderAngle seed ->
                 let
                     ( steering, _, _ ) =
-                        wander defaultConfig defaultWanderConfig seed wanderAngle source
+                        wander defaultConfig defaultWanderConfig (Duration.seconds 0.1) seed wanderAngle source
                 in
                 case steering.angular of
                     Just angularAcceleration ->
@@ -1350,10 +1351,10 @@ wanderFuzzTests =
             \source wanderAngle seed ->
                 let
                     ( steering1, angle1, seed1 ) =
-                        wander defaultConfig defaultWanderConfig seed wanderAngle source
+                        wander defaultConfig defaultWanderConfig (Duration.seconds 0.1) seed wanderAngle source
 
                     ( steering2, angle2, seed2 ) =
-                        wander defaultConfig defaultWanderConfig seed wanderAngle source
+                        wander defaultConfig defaultWanderConfig (Duration.seconds 0.1) seed wanderAngle source
                 in
                 Expect.all
                     [ \_ -> steering1 |> Expect.equal steering2
@@ -1372,7 +1373,7 @@ wanderIntegrationTests =
                 wanderBehavior transform ( seed, wanderAngle ) =
                     let
                         ( steering, nextWanderAngle, nextSeed ) =
-                            wander steeringConfig defaultWanderConfig seed wanderAngle transform
+                            wander steeringConfig defaultWanderConfig (Duration.seconds 0.1) seed wanderAngle transform
                     in
                     ( steering, ( nextSeed, nextWanderAngle ) )
 
@@ -1405,7 +1406,7 @@ wanderIntegrationTests =
                         Angle.radians 0
 
                     trajectory =
-                        simulateWanderSteps 30 defaultSeed defaultConfig initialWanderAngle initialKinematic
+                        simulateWanderSteps 60 defaultSeed defaultConfig initialWanderAngle initialKinematic
 
                     positions =
                         trajectory |> List.map (.kinematic >> .position)
@@ -1427,7 +1428,7 @@ wanderIntegrationTests =
                                                 |> Quantity.minus first
                                                 |> Angle.normalize
                                                 |> Quantity.abs
-                                                |> Quantity.greaterThan (Angle.radians 0.1)
+                                                |> Quantity.greaterThan (Angle.radians 0.01)
                                         )
 
                             [] ->
@@ -1467,7 +1468,7 @@ wanderIntegrationTests =
                             |> Quantity.minus initialWanderAngle
                             |> Quantity.abs
                 in
-                totalChange |> expectGreaterThan (Angle.radians 0.05)
+                totalChange |> expectGreaterThan (Angle.radians 0.01)
         , test "agent keeps moving forward" <|
             \_ ->
                 let

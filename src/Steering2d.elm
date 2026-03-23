@@ -27,7 +27,7 @@ import Angle exposing (Angle)
 import AngularAcceleration exposing (AngularAcceleration)
 import AngularSpeed exposing (AngularSpeed)
 import Direction2d exposing (Direction2d)
-import Duration
+import Duration exposing (Duration)
 import Length exposing (Length)
 import Point2d exposing (Point2d)
 import Quantity exposing (Quantity(..))
@@ -264,24 +264,35 @@ lookAt config source target =
 type alias WanderConfig2d =
     { distance : Length
     , radius : Length
-    , rate : Float
+    , rate : AngularSpeed
+    , damping : Float
     }
 
 
 wander :
     SteeringConfig2d
     -> WanderConfig2d
+    -> Duration
     -> Random.Seed
     -> Angle
     -> Kinematic2d coords
     -> ( Steering2d coords, Angle, Random.Seed )
-wander steeringConfig { distance, radius, rate } seed wanderOrientation source =
+wander steeringConfig { distance, radius, rate, damping } dt seed wanderOrientation source =
     let
+        maxDelta =
+            Angle.inRadians (rate |> Quantity.for dt)
+
         ( angleDelta, nextSeed ) =
-            Random.step (generateAngleDelta -rate rate) seed
+            Random.step (generateAngleDelta maxDelta) seed
+
+        dampFactor =
+            Basics.e ^ (-damping * Duration.inSeconds dt)
+
+        dampedOrientation =
+            wanderOrientation |> Quantity.multiplyBy dampFactor
 
         nextWanderOrientation =
-            wanderOrientation |> Quantity.plus angleDelta
+            dampedOrientation |> Quantity.plus angleDelta
 
         targetOrientation =
             source.orientation |> Quantity.plus nextWanderOrientation
@@ -513,10 +524,11 @@ accumulateAngular config weight steering acc =
                     acc |> Quantity.plus (remainingBudget |> Quantity.multiplyBy sign)
 
 
-generateAngleDelta : Float -> Float -> Random.Generator Angle
-generateAngleDelta min max =
-    Random.float min max
-        |> Random.map Angle.radians
+generateAngleDelta : Float -> Random.Generator Angle
+generateAngleDelta maxDelta =
+    Random.map2 (\a b -> Angle.radians (a - b))
+        (Random.float 0 maxDelta)
+        (Random.float 0 maxDelta)
 
 
 isCloseToZeroVelocity : Speed -> Bool
