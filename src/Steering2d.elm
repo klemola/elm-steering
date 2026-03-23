@@ -186,16 +186,20 @@ seek config source target =
             none
 
 
-flee : SteeringConfig2d -> Kinematic2d coords -> Point2d Length.Meters coords -> Steering2d coords
-flee config source target =
-    case Direction2d.from target source.position of
-        Just directionFromTarget ->
-            { linear = Just (Vector2d.withLength config.maxAcceleration directionFromTarget)
-            , angular = Nothing
-            }
+flee : SteeringConfig2d -> Length -> Kinematic2d coords -> Point2d Length.Meters coords -> Steering2d coords
+flee config panicDistance source target =
+    if Point2d.distanceFrom source.position target |> Quantity.greaterThan panicDistance then
+        none
 
-        Nothing ->
-            none
+    else
+        case Direction2d.from target source.position of
+            Just directionFromTarget ->
+                { linear = Just (Vector2d.withLength config.maxAcceleration directionFromTarget)
+                , angular = Nothing
+                }
+
+            Nothing ->
+                none
 
 
 arrive : SteeringConfig2d -> Kinematic2d coords -> Point2d Length.Meters coords -> Steering2d coords

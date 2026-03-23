@@ -975,9 +975,32 @@ fleeTests =
                     dirFromTarget =
                         Direction2d.from target source.position |> Maybe.withDefault Direction2d.positiveX
                 in
-                flee config source target
+                flee config (Length.meters 100) source target
                     |> .linear
                     |> Expect.equal (Just (maxAccelerationTowards config dirFromTarget))
+        , test "returns none when target is beyond panic distance" <|
+            \_ ->
+                let
+                    source =
+                        atOrigin
+
+                    target =
+                        Point2d.meters 50 0
+                in
+                flee defaultConfig (Length.meters 10) source target
+                    |> Expect.equal none
+        , test "produces steering when target is within panic distance" <|
+            \_ ->
+                let
+                    source =
+                        atOrigin
+
+                    target =
+                        Point2d.meters 5 0
+                in
+                flee defaultConfig (Length.meters 10) source target
+                    |> .linear
+                    |> Expect.notEqual Nothing
         ]
 
 
@@ -987,8 +1010,11 @@ fleeFuzzTests =
         [ fuzz2 kinematicFuzzer point2dFuzzer "always respects max acceleration limits" <|
             \source targetPos ->
                 let
+                    largePanicDistance =
+                        Length.meters 10000
+
                     result =
-                        flee defaultConfig source targetPos
+                        flee defaultConfig largePanicDistance source targetPos
                 in
                 case result.linear of
                     Just acceleration ->
@@ -1000,6 +1026,24 @@ fleeFuzzTests =
 
                         else
                             Expect.fail "Expected linear acceleration"
+        , fuzz2 kinematicFuzzer point2dFuzzer "only produces steering when within panic distance" <|
+            \source targetPos ->
+                let
+                    panicDistance =
+                        Length.meters 10
+
+                    result =
+                        flee defaultConfig panicDistance source targetPos
+
+                    distance =
+                        Point2d.distanceFrom source.position targetPos
+                in
+                if distance |> Quantity.greaterThan panicDistance then
+                    result
+                        |> Expect.equal none
+
+                else
+                    Expect.pass
         ]
 
 
@@ -1016,7 +1060,7 @@ fleeIntegrationTests =
                         atOrigin |> withPosition (Point2d.meters -5 0)
 
                     trajectory =
-                        simulateSteps 20 (\kinematic -> flee defaultConfig kinematic target) initialKinematic
+                        simulateSteps 20 (\kinematic -> flee defaultConfig (Length.meters 100) kinematic target) initialKinematic
 
                     distances =
                         List.map (distanceToTarget target) trajectory
@@ -1035,7 +1079,7 @@ fleeIntegrationTests =
                         Point2d.distanceFrom initialKinematic.position target
 
                     trajectory =
-                        simulateSteps 10 (\transform -> flee defaultConfig transform target) initialKinematic
+                        simulateSteps 10 (\transform -> flee defaultConfig (Length.meters 100) transform target) initialKinematic
 
                     finalDistance =
                         trajectory
